@@ -448,11 +448,10 @@ class ArrowDetector:
         # determine the smallest distance(s)
         valid_distances = {side: dist for side, dist in distances.items() if dist is not None}
 
-        if debug: # for debugger
+        if debug:
             cv2.imshow(f'Debug', mask)
             cv2.waitKey(0)
             cv2.destroyAllWindows()
-            pass
 
         if not valid_distances:
             return [], {side: False for side in distances}

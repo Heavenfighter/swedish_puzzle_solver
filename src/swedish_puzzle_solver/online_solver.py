@@ -2,7 +2,7 @@ import time
 import urllib.parse
 import urllib3
 import inspect
-
+import json
 import requests
 from bs4 import BeautifulSoup
 from spellchecker import SpellChecker
@@ -23,8 +23,8 @@ class OnlineSolver:
 
     def __init__(self, lang='de'):
         self.sources = [
-            self._get_from_woxikon,
-            # self._get_from_kreuzwort_net,
+            # self._get_from_woxikon,
+            self._get_from_kreuzwort_net,
             self._get_from_wort_suchen,
         ]
         self.lang = lang
@@ -76,29 +76,39 @@ class OnlineSolver:
 
     def _get_from_kreuzwort_net(self, hint_text:str, word_length=None) -> list[str]:
 
-        url = "https://www.kreuzwort.net/api/question/search"
+        base_url = "https://www.kreuzwort.net/"
 
-        payload = {
-            "query": hint_text.strip(),
-            "pattern": "_" * word_length if word_length else ""
-        }
+        query = replace_umlauts(hint_text.replace(",", "").replace(".", "").replace(":", ""))
+        query = query.strip().lower().replace(" ", "-")
+        query += ".html?pattern="
+        query += "_" * word_length if word_length else ""
+
+        url = base_url + "fragen/" + query
 
         self._headers.update({
             "Content-Type": "application/json",
-            "Accept": "application/json"
+            "Accept": "application/json, text/plain, */*"
         })
 
         candidates = []
 
         try:
-            response = requests.post(url, json=payload, headers=self._headers, timeout=5, verify=False)
+            response = requests.get(url, headers=self._headers, timeout=5, verify=False)
             response.raise_for_status()
-            data = response.json()
 
-            for entry in data.get("results", []):
-                solution = entry.get("solution", "").strip().lower()
-                if solution.isalpha():
-                    candidates.append(solution)
+            soup = BeautifulSoup(response.text, "html.parser")
+            answers = soup.find(id='js-question-answers')
+
+            if not answers:
+                return []
+
+            data_json = json.loads(answers.attrs['data-answers'])
+            answers = data_json[str(word_length)]
+
+            for answer in answers.keys():
+                anw = answer.encode('latin-1', 'ignore').decode(
+                    'latin-1').upper().strip()
+                candidates.append(anw)
 
         except requests.exceptions.HTTPError:
             print(f"[{inspect.currentframe().f_code.co_name}] HTTP error ({response.status_code}): {url}")
