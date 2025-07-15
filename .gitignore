@@ -1,3 +1,7 @@
+
+# swedish_puzzle_solver
+/res/db/clues.db
+
 # python
 /.venv
 __pycache__

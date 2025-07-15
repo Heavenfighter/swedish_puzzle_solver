@@ -1,0 +1,28 @@
+[project]
+name = "swedish_puzzle_solver"
+version = "0.1.0"
+description = "A little swedish puzzle solver"
+authors = [
+    {name = "Heavenfighter", email = "Heavenfighter@users.noreply.github.com"},
+]
+dependencies = [
+    "requests",
+    "opencv-python",
+    "argparse",
+    "pytesseract",
+    "pyspellchecker",
+    "numpy",
+    "beautifulsoup4"
+]
+
+requires-python = ">=3.10,<3.14"
+readme = "README.md"
+
+
+[build-system]
+requires = ["pdm-backend"]
+build-backend = "pdm.backend"
+
+[tool.pdm.scripts]  # https://pdm-project.org/latest/usage/scripts/
+app   = "python -m swedish_puzzle_solver"
+debug = "python -m pdb -m swedish_puzzle_solver"
