@@ -12,9 +12,9 @@ from typing import List, Tuple, Optional, Dict, Final
 import cv2
 import numpy as np
 
-from swedish_puzzle_solver.arrow_detector import ArrowDetector, Arrow, ArrowDirection
-from swedish_puzzle_solver.image_processor import ImageProcessor
-from swedish_puzzle_solver.online_solver import OnlineSolver
+from arrow_detector import ArrowDetector, Arrow, ArrowDirection
+from image_processor import ImageProcessor
+from online_solver import OnlineSolver
 
 class Celltype(enum.Enum):
     EMPTY = enum.auto()
@@ -31,6 +31,11 @@ TYPE_COLORS = {
 LOG:Final[Logger] = logging.getLogger()
 LOG.setLevel(logging.DEBUG)
 logging.basicConfig(format="%(levelname)s: %(message)s")
+
+# disable some loggings
+logging.getLogger("requests").setLevel(logging.CRITICAL)
+logging.getLogger("urllib3").setLevel(logging.CRITICAL)
+logging.getLogger("pytesseract").setLevel(logging.CRITICAL)
 
 class Cell:
     """
