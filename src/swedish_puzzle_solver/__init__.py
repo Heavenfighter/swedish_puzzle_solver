@@ -6,6 +6,8 @@ import os
 import sys
 import argparse
 import logging
+from asyncio import as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import closing
 
 import cv2
@@ -13,7 +15,6 @@ import numpy as np
 import sqlite3
 import json
 
-from logging import Logger
 from pathlib import Path
 from typing import List, Tuple, Optional, Dict, Final
 
@@ -33,7 +34,9 @@ TYPE_COLORS = {
     Celltype.ARROW: (0, 0, 255),
 }
 
-LOG:Final[Logger] = logging.getLogger()
+DB_PATH = 'res/db/clues.db'
+
+LOG:Final[logging.Logger] = logging.getLogger()
 LOG.setLevel(logging.INFO)
 logging.basicConfig(format="%(levelname)s: %(message)s")
 
@@ -41,6 +44,7 @@ logging.basicConfig(format="%(levelname)s: %(message)s")
 logging.getLogger("requests").setLevel(logging.CRITICAL)
 logging.getLogger("urllib3").setLevel(logging.CRITICAL)
 logging.getLogger("pytesseract").setLevel(logging.CRITICAL)
+logging.getLogger("asyncio").setLevel(logging.CRITICAL)
 
 class Cell:
     """
@@ -85,12 +89,14 @@ class ClueCell(Cell):
         self.type = Celltype.CLUE
         self._solver = OnlineSolver()
 
-    def lookup_answers(self, db_conn:sqlite3.Connection=None) -> None:
-
+    def lookup_answers(self) -> None:
+        db_conn = sqlite3.connect(DB_PATH)
         cursor = db_conn.cursor() if db_conn else None
 
         for clue in self.clues:
             try:
+                LOG.debug(f"searching {clue.id} ({len(clue.path)})")
+
                 row = None
                 if cursor:
                     cursor.execute("SELECT id, solutions FROM clues WHERE id = ?", (clue.id,))
@@ -102,12 +108,15 @@ class ClueCell(Cell):
                     if cursor and clue.candidates:
                         cursor.execute("INSERT OR REPLACE INTO clues (id, solutions) VALUES (?, ?)", (clue.id, json.dumps(clue.candidates)))
                 else:
-                    LOG.debug(f"searching for: '{clue.id}' (length: {len(clue.path)})")
                     clue.candidates = json.loads(row[1])
             except Exception as ex:
                 LOG.error(ex, exc_info=True)
+            finally:
+                db_conn.close() if db_conn else None
+                LOG.debug(clue.candidates)
 
-            LOG.debug(clue.candidates)
+                # take all candidates as remaining
+                clue.remaining = clue.candidates.copy()
 
     def add_clue(self, text:str):
         clue = Clue(text, self)
@@ -190,22 +199,23 @@ class SwedishPuzzleSolver(ImageProcessor):
     """
     Detects grid with OpenCV, OCRs clues, queries online, then backtracks fill.
     """
-    def __init__(self, db_conn:sqlite3.Connection=None) -> None:
+    def __init__(self) -> None:
         super().__init__()
 
         self.__orig_img = None
         self.__warped_img = None
         self.board: Board
-        self.__db_connection = db_conn
 
-        if self.__db_connection:
-            with closing(self.__db_connection.cursor()) as cursor:
-                cursor.execute('''
-                    CREATE TABLE IF NOT EXISTS clues (
-                        id Text PRIMARY KEY,
-                        solutions Text
-                    )
-                ''')
+        connection = sqlite3.connect(DB_PATH)
+        with closing(connection.cursor()) as cursor:
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS clues (
+                    id Text PRIMARY KEY,
+                    solutions Text
+                )
+            ''')
+        connection.commit()
+        connection.close()
 
     @staticmethod
     def __cluster_coords(coords:List[int], eps:int=10) -> List[int]:
@@ -237,6 +247,19 @@ class SwedishPuzzleSolver(ImageProcessor):
         # return the mean value of each cluster
         return [int(np.mean(cl)) for cl in clusters]
 
+    def _process_row(self, row_idx, y1, y2, cols, img_warped) -> Tuple[int, List[Cell]]:
+        """
+        For parallel proccessing rows
+        speed up, but log goes weird
+        """
+        row = []
+        for col_idx, (x1, x2) in enumerate(zip(cols[:-1], cols[1:])):
+            img_cell = img_warped[y1:y2, x1:x2]
+            cell = self.__classify_cell(row_idx, col_idx, img_cell)
+            cell.set_position((x1, y1), (x2, y2))
+            row.append(cell)
+        return row_idx, row
+
     def __extract_cells(self, img_warped:np.ndarray) -> None:
         horiz, vert = self.detect_grid_lines(img_warped)
         inters = cv2.bitwise_and(horiz, vert)
@@ -246,17 +269,27 @@ class SwedishPuzzleSolver(ImageProcessor):
         cols = self.__cluster_coords(list(xs))
 
         self.board.cells.clear()
+
+        #self.board.cells = [None] * (len(rows) - 1)  # Ergebnisliste vorbereiten
+        #with ThreadPoolExecutor(max_workers=8) as executor:
+        #    futures = [
+        #        executor.submit(self._process_row, row_idx, y1, y2, cols, img_warped)
+        #            for row_idx, (y1, y2) in enumerate(zip(rows[:-1], rows[1:]))
+        #    ]
+
+        #    for future in as_completed(futures):
+        #        row_idx, row = future.result()
+        #        self.board.cells[row_idx] = row
+
         for row_idx, (y1, y2) in enumerate(zip(rows[:-1], rows[1:])):
             row = []
             for col_idx, (x1, x2) in enumerate(zip(cols[:-1], cols[1:])):
                 img_cell = img_warped[y1:y2, x1:x2]
-
                 cell = self.__classify_cell(row_idx, col_idx, img_cell)
                 cell.set_position((x1, y1), (x2, y2))
-
                 row.append(cell)
-            self.board.cells.append(row)
 
+            self.board.cells.append(row)
         self.board.slots_by_id = {c.id: c for c in self.board.clues}
 
     def __classify_cell(self, row_idx: int, col_idx: int, cell_img:np.ndarray) -> Cell:
@@ -740,12 +773,19 @@ class SwedishPuzzleSolver(ImageProcessor):
         else:
             # lookup candidates online
             LOG.info("hoping for answers...")
-            for clue_cell in self.board.clue_cells:
-                clue_cell.lookup_answers(self.__db_connection)
 
-        for clue in self.board.clues:
-            # take all candidates as remaining
-            clue.remaining = clue.candidates.copy()
+            with ThreadPoolExecutor(max_workers=5) as executor:
+                # Dictionary zum Zuordnen der Futures zu ihren Funktionen
+                future_to_obj = {
+                    executor.submit(clue_cell.lookup_answers): clue_cell for clue_cell in self.board.clue_cells
+                }
+
+                for future in as_completed(future_to_obj):
+                    obj = future_to_obj[future]
+                    try:
+                        future.result()
+                    except Exception as ex:
+                        LOG.error(f"Object {obj} failed: {ex}")
 
         LOG.info("answers are being processed...")
 
@@ -882,8 +922,6 @@ def main(args: list[str]) -> None:
     res_path = Path("res/db")
     res_path.mkdir(parents=True, exist_ok=True)
 
-    connection = sqlite3.connect('res/db/clues.db')
-
     parser = argparse.ArgumentParser(
         description="This little program solves the crossword puzzle with a little magic and a lot of luck.",
         epilog="Thanks for trying!"
@@ -907,7 +945,7 @@ def main(args: list[str]) -> None:
         LOG.setLevel(logging.DEBUG)
 
     try:
-        solver = SwedishPuzzleSolver(connection)
+        solver = SwedishPuzzleSolver()
 
         for img_path in args.puzzle_image_path:
             solver.build_board(img_path)
@@ -919,9 +957,6 @@ def main(args: list[str]) -> None:
             solver.print_grid(img=solver.board.warped, cells=solver.board.cells)
     except Exception as ex:
         LOG.error(ex)
-    finally:
-        connection.commit()
-        connection.close()
 
 if __name__ == "__main__":
     main(sys.argv)

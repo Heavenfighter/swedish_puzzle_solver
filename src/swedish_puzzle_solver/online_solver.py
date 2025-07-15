@@ -1,15 +1,19 @@
 import time
 import urllib.parse
 from typing import Final
-
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Callable, List
 import urllib3
 import json
+import io
 import requests
 from bs4 import BeautifulSoup
 from spellchecker import SpellChecker
 
 import logging
 from logging import Logger
+
+from swedish_puzzle_solver.util import run_functions_in_parallel
 
 LOG:Final[Logger] = logging.getLogger(__name__)
 
@@ -27,11 +31,12 @@ def replace_umlauts(text):
 class OnlineSolver:
 
     def __init__(self, lang='de'):
-        self.sources = [
-            # self._get_from_woxikon,
+        self.source_functions: List[Callable[[any, any], List[str]]] = [
             self._get_from_kreuzwort_net,
             self._get_from_wort_suchen,
+            #self._get_from_woxikon,
         ]
+
         self.lang = lang
 
         self._headers = {
@@ -156,17 +161,10 @@ class OnlineSolver:
     def lookup_answers_online(self, hint_text: str, word_length=None):
         all_results = []
 
-        LOG.debug(f"searching for: '{hint_text}' (length: {word_length})")
-
-        for source_fn in self.sources:
-            try:
-                LOG.debug(f'using {source_fn.__name__}: ')
-                words = source_fn(hint_text, word_length)
-                LOG.debug(f'\tresult: {words}')
-                all_results.extend(words)
-                time.sleep(1)
-            except Exception as e:
-                LOG.error(f"error at{source_fn.__name__}: {e}")
+        all_results = run_functions_in_parallel( self.source_functions,
+            arg1=hint_text, arg2=word_length)
 
         # Duplikate entfernen, sortieren
-        return sorted(set(all_results))
+        result = sorted(set(all_results))
+
+        return result
