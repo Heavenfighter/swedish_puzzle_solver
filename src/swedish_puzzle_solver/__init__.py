@@ -6,15 +6,20 @@ import os
 import sys
 import argparse
 import logging
-from logging import Logger
-from typing import List, Tuple, Optional, Dict, Final
+from contextlib import closing
 
 import cv2
 import numpy as np
+import sqlite3
+import json
 
-from arrow_detector import ArrowDetector, Arrow, ArrowDirection
-from image_processor import ImageProcessor
-from online_solver import OnlineSolver
+from logging import Logger
+from pathlib import Path
+from typing import List, Tuple, Optional, Dict, Final
+
+from .arrow_detector import ArrowDetector, Arrow, ArrowDirection
+from .image_processor import ImageProcessor
+from .online_solver import OnlineSolver
 
 class Celltype(enum.Enum):
     EMPTY = enum.auto()
@@ -29,7 +34,7 @@ TYPE_COLORS = {
 }
 
 LOG:Final[Logger] = logging.getLogger()
-LOG.setLevel(logging.DEBUG)
+LOG.setLevel(logging.INFO)
 logging.basicConfig(format="%(levelname)s: %(message)s")
 
 # disable some loggings
@@ -80,10 +85,28 @@ class ClueCell(Cell):
         self.type = Celltype.CLUE
         self._solver = OnlineSolver()
 
-    def lookup_answers(self):
+    def lookup_answers(self, db_conn:sqlite3.Connection=None) -> None:
+
+        cursor = db_conn.cursor() if db_conn else None
+
         for clue in self.clues:
-            clue.add_candidates(self._solver.lookup_answers_online(clue.id, len(clue.path)))
-            #print(f'self.board._slots_by_id["{clue.id}"].add_candidates({clue.candidates})')
+            try:
+                row = None
+                if cursor:
+                    cursor.execute("SELECT id, solutions FROM clues WHERE id = ?", (clue.id,))
+                    row = cursor.fetchone()
+
+                if not row:
+                    clue.add_candidates(self._solver.lookup_answers_online(clue.id, len(clue.path)))
+
+                    if cursor and clue.candidates:
+                        cursor.execute("INSERT OR REPLACE INTO clues (id, solutions) VALUES (?, ?)", (clue.id, json.dumps(clue.candidates)))
+                else:
+                    LOG.debug(f"searching for: '{clue.id}' (length: {len(clue.path)})")
+                    clue.candidates = json.loads(row[1])
+            except Exception as ex:
+                LOG.error(ex, exc_info=True)
+
             LOG.debug(clue.candidates)
 
     def add_clue(self, text:str):
@@ -167,13 +190,22 @@ class SwedishPuzzleSolver(ImageProcessor):
     """
     Detects grid with OpenCV, OCRs clues, queries online, then backtracks fill.
     """
-
-    def __init__(self) -> None:
+    def __init__(self, db_conn:sqlite3.Connection=None) -> None:
         super().__init__()
 
         self.__orig_img = None
         self.__warped_img = None
         self.board: Board
+        self.__db_connection = db_conn
+
+        if self.__db_connection:
+            with closing(self.__db_connection.cursor()) as cursor:
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS clues (
+                        id Text PRIMARY KEY,
+                        solutions Text
+                    )
+                ''')
 
     @staticmethod
     def __cluster_coords(coords:List[int], eps:int=10) -> List[int]:
@@ -205,7 +237,7 @@ class SwedishPuzzleSolver(ImageProcessor):
         # return the mean value of each cluster
         return [int(np.mean(cl)) for cl in clusters]
 
-    def __extract_cells(self, img_warped:np.ndarray):
+    def __extract_cells(self, img_warped:np.ndarray) -> None:
         horiz, vert = self.detect_grid_lines(img_warped)
         inters = cv2.bitwise_and(horiz, vert)
 
@@ -416,6 +448,7 @@ class SwedishPuzzleSolver(ImageProcessor):
         # build board and classify all cells
         LOG.info(f"extracting cells...")
         self.__extract_cells(self.__warped_img)
+        LOG.info(f"{sum(map(len, self.board.cells))} cells found")
 
         if LOG.getEffectiveLevel() == logging.DEBUG:
             self.print_grid(img=self.__warped_img, cells=self.board.cells, debug=True)
@@ -708,7 +741,7 @@ class SwedishPuzzleSolver(ImageProcessor):
             # lookup candidates online
             LOG.info("hoping for answers...")
             for clue_cell in self.board.clue_cells:
-                clue_cell.lookup_answers()
+                clue_cell.lookup_answers(self.__db_connection)
 
         for clue in self.board.clues:
             # take all candidates as remaining
@@ -845,6 +878,12 @@ def main(args: list[str]) -> None:
     # take lang ressource from res dir
     os.putenv("TESSDATA_PREFIX", "res")
 
+    # path to db
+    res_path = Path("res/db")
+    res_path.mkdir(parents=True, exist_ok=True)
+
+    connection = sqlite3.connect('res/db/clues.db')
+
     parser = argparse.ArgumentParser(
         description="This little program solves the crossword puzzle with a little magic and a lot of luck.",
         epilog="Thanks for trying!"
@@ -868,7 +907,7 @@ def main(args: list[str]) -> None:
         LOG.setLevel(logging.DEBUG)
 
     try:
-        solver = SwedishPuzzleSolver()
+        solver = SwedishPuzzleSolver(connection)
 
         for img_path in args.puzzle_image_path:
             solver.build_board(img_path)
@@ -880,6 +919,9 @@ def main(args: list[str]) -> None:
             solver.print_grid(img=solver.board.warped, cells=solver.board.cells)
     except Exception as ex:
         LOG.error(ex)
+    finally:
+        connection.commit()
+        connection.close()
 
 if __name__ == "__main__":
     main(sys.argv)
