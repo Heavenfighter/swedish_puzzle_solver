@@ -1,9 +1,9 @@
-from typing import List, Tuple, Optional, Dict
 
 import cv2
 import numpy as np
 import pytesseract
 
+from typing import List, Tuple, Optional, Dict
 from spellchecker import SpellChecker
 
 class ImageProcessor:

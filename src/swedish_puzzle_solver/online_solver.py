@@ -1,11 +1,17 @@
 import time
 import urllib.parse
+from typing import Final
+
 import urllib3
-import inspect
 import json
 import requests
 from bs4 import BeautifulSoup
 from spellchecker import SpellChecker
+
+import logging
+from logging import Logger
+
+LOG:Final[Logger] = logging.getLogger(__name__)
 
 def replace_umlauts(text):
     replacements = {
@@ -17,7 +23,6 @@ def replace_umlauts(text):
         text = text.replace(original, replacement)
 
     return text
-
 
 class OnlineSolver:
 
@@ -62,15 +67,8 @@ class OnlineSolver:
                     anw = row.select("a.cw-answer-link")[0].get_text(strip=True).encode('latin-1', 'ignore').decode(
                         'latin-1').upper().strip()
                     candidates.append(anw)
-
-        except requests.exceptions.HTTPError:
-            print(f"[{inspect.currentframe().f_code.co_name}] HTTP error ({response.status_code}): {url}")
-        except requests.exceptions.Timeout:
-            print(f"[{inspect.currentframe().f_code.co_name}] timeout for request: {url}")
-        except requests.exceptions.RequestException as e:
-            print(f"[{inspect.currentframe().f_code.co_name}] connection error: {e}")
-        except Exception as e:
-            print(f"[{inspect.currentframe().f_code.co_name}] unexpected error: {e}")
+        except Exception as ex:
+            LOG.error(ex, exc_info=True)
         finally:
             return candidates
 
@@ -110,14 +108,9 @@ class OnlineSolver:
                     'latin-1').upper().strip()
                 candidates.append(anw)
 
-        except requests.exceptions.HTTPError:
-            print(f"[{inspect.currentframe().f_code.co_name}] HTTP error ({response.status_code}): {url}")
-        except requests.exceptions.Timeout:
-            print(f"[{inspect.currentframe().f_code.co_name}] timeout for request: {url}")
-        except requests.exceptions.RequestException as e:
-            print(f"[{inspect.currentframe().f_code.co_name}] connection error: {e}")
-        except Exception as e:
-            print(f"[{inspect.currentframe().f_code.co_name}] unexpected error: {e}")
+
+        except Exception as ex:
+            LOG.error(ex, exc_info=True)
         finally:
             return candidates
 
@@ -155,34 +148,25 @@ class OnlineSolver:
                         'latin-1').upper().strip()
                     candidates.append(anw)
 
-        except requests.exceptions.HTTPError:
-            print(f"[{inspect.currentframe().f_code.co_name}] HTTP error ({response.status_code}): {url}")
-        except requests.exceptions.Timeout:
-            print(f"[{inspect.currentframe().f_code.co_name}] timeout for request: {url}")
-        except requests.exceptions.RequestException as e:
-            print(f"[{inspect.currentframe().f_code.co_name}] connection error: {e}")
-        except Exception as e:
-            print(f"[{inspect.currentframe().f_code.co_name}] unexpected error: {e}")
+        except Exception as ex:
+            LOG.error(ex, exc_info=True)
         finally:
             return candidates
 
-    def lookup_answers_online(self, hint_text: str, word_length=None, debug=False):
+    def lookup_answers_online(self, hint_text: str, word_length=None):
         all_results = []
 
-        if debug:
-         print(f"searching for: '{hint_text}' (length: {word_length})")
+        LOG.debug(f"searching for: '{hint_text}' (length: {word_length})")
 
         for source_fn in self.sources:
             try:
-                if debug:
-                    print(f'using {source_fn.__name__}: ', end='')
+                LOG.debug(f'using {source_fn.__name__}: ')
                 words = source_fn(hint_text, word_length)
-                if debug:
-                    print(f'{words}')
+                LOG.debug(f'\tresult: {words}')
                 all_results.extend(words)
                 time.sleep(1)
             except Exception as e:
-                print(f"error at{source_fn.__name__}: {e}")
+                LOG.error(f"error at{source_fn.__name__}: {e}")
 
         # Duplikate entfernen, sortieren
         return sorted(set(all_results))

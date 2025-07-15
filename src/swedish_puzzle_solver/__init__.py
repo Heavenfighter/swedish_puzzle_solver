@@ -4,12 +4,14 @@ from __future__ import annotations
 import enum
 import os
 import sys
-from typing import List, Tuple, Optional, Dict
+import argparse
+import logging
+from logging import Logger
+from typing import List, Tuple, Optional, Dict, Final
 
 import cv2
 import numpy as np
 
-#from spellchecker import SpellChecker
 from swedish_puzzle_solver.arrow_detector import ArrowDetector, Arrow, ArrowDirection
 from swedish_puzzle_solver.image_processor import ImageProcessor
 from swedish_puzzle_solver.online_solver import OnlineSolver
@@ -25,6 +27,10 @@ TYPE_COLORS = {
     Celltype.CLUE: (255, 0, 0),
     Celltype.ARROW: (0, 0, 255),
 }
+
+LOG:Final[Logger] = logging.getLogger()
+LOG.setLevel(logging.DEBUG)
+logging.basicConfig(format="%(levelname)s: %(message)s")
 
 class Cell:
     """
@@ -69,13 +75,11 @@ class ClueCell(Cell):
         self.type = Celltype.CLUE
         self._solver = OnlineSolver()
 
-    def lookup_answers(self, debug=False):
+    def lookup_answers(self):
         for clue in self.clues:
-            clue.add_candidates(self._solver.lookup_answers_online(clue.id, len(clue.path), debug))
+            clue.add_candidates(self._solver.lookup_answers_online(clue.id, len(clue.path)))
             #print(f'self.board._slots_by_id["{clue.id}"].add_candidates({clue.candidates})')
-
-            if debug:
-                print(clue.candidates)
+            LOG.debug(clue.candidates)
 
     def add_clue(self, text:str):
         clue = Clue(text, self)
@@ -104,6 +108,9 @@ class Clue:
 
         # take all candidates as remaining
         self.remaining = self.candidates.copy()
+
+    def __str__(self):
+        return f"{(self.clue_cell.row,self.clue_cell.col)} {self.id}"
 
 class LetterCell(Cell):
     def __init__(self, board: Board, row:int, col:int, image:np.array):
@@ -237,14 +244,15 @@ class SwedishPuzzleSolver(ImageProcessor):
             Cell: new cell with proper type
         """
 
-        print(f'analyse: row {row_idx} col {col_idx}')
+        LOG.debug(f'analysing: row {row_idx} col {col_idx}')
 
         # Convert to grayscale
         gray = cv2.cvtColor(cell_img, cv2.COLOR_BGR2GRAY)
 
         # pre-classify with white ratio
         dark_ratio = self.get_cell_dark_ratio(gray)
-        print(f'\tdark_ratio: {dark_ratio}')
+
+        LOG.debug(f'\tdark_ratio: {dark_ratio}')
 
         cell = LetterCell(self.board, row=row_idx, col=col_idx, image=cell_img)
         if dark_ratio > 125:
@@ -258,23 +266,19 @@ class SwedishPuzzleSolver(ImageProcessor):
 
             for gray_part_img in res["parts"]:
 
-                #cv2.imshow('cell part', gray_part_img)
-                #cv2.waitKey(0)
-                #cv2.destroyAllWindows()
-
                 if col_idx == 0 and row_idx == 9:
                     pass
 
                 text = self.extract_text(row_idx, col_idx, gray_part_img)
                 if text:
                     cell.add_clue(text)
-                    print(f'\tclues: {text}')
+                    LOG.debug(f'\tclues: {text}')
                 else:
-                    cell.add_clue("s")
+                    cell.add_clue("")
 
             if len(cell.clues) != len(res["parts"]):
-                # not all clues could be determined
-                print("Could not determine all clues")
+                # not all clues could be determined, don't exit
+                LOG.info("Could not determine all clues")
         else:
             enlarged = cv2.resize(gray, None, fx=1.5, fy=1.5, interpolation=cv2.INTER_CUBIC)
 
@@ -286,27 +290,22 @@ class SwedishPuzzleSolver(ImageProcessor):
                 pass
 
             if len(arrows):
+                # remove border artifacts by coloring dark pixel white
                 without_borders = self.remove_border_artifacts(gray, thresh=240, max_coverage=0.03)
-                without_borders = self.crop_border(without_borders, remove=2)
 
-                resized_up = cv2.resize(without_borders, None, fx=1.5, fy=1.5, interpolation=cv2.INTER_LANCZOS4)
+                # to ensure there are no disorders, crop outer 4 pixel
+                without_borders = self.crop_border(without_borders, remove=4)
 
-                # if img is cropped by crop_border search_depth only 2, else 5
-                # depends on thickness of outer lines.
-                # Some puzzles have an small distance between cell border an arrow
-                # maybe an TODO: improve detection
-                #_, arrow_source_sides_dict = (
-                 #   detector.detect_black_lines_near_edges_old(image=resized_up,
-                #                                           threshold=150,
-                #                                           edge_search_depth=6,
-                #                                           debug=(row_idx==4 and col_idx==1)))
+                resized_up = cv2.resize(without_borders, None, fx=2, fy=2, interpolation=cv2.INTER_LANCZOS4)
 
-                # treshold 127 for cells with light circles
+                # Some puzzles have a small distance between cell border an arrow
+                # therefore only one pixel tolerance
                 _, arrow_source_sides_dict = (
                     detector.detect_black_lines_near_edges(image=resized_up,
-                                                           threshold=170, tolerance=2))
+                                                           threshold=50, tolerance=1))
 
-                if not any(arrow_source_sides_dict.values()) or sum(1 for value in arrow_source_sides_dict.values() if value) != len(arrows):
+                if (not any(arrow_source_sides_dict.values()) or
+                        sum(1 for value in arrow_source_sides_dict.values() if value) != len(arrows)):
                     raise ValueError("arrow source could not be determined!")
 
                 # with two arrows in one cell, we have to conclude the right direction
@@ -342,7 +341,7 @@ class SwedishPuzzleSolver(ImageProcessor):
                                 arrows[0].direction = ArrowDirection.LEFT_DOWN
 
                 cell.add_arrows(arrows)
-                print(f'\tArrows: {arrows}')
+                LOG.debug(f'\tArrows: {arrows}')
 
         return cell
 
@@ -352,20 +351,26 @@ class SwedishPuzzleSolver(ImageProcessor):
         2. Assign clue_idx & clue_text to that cell
         3. Record path in Clue
         """
-        idx = 1
-        for cell in board.arrow_cells:
-            for arr_idx, arrow in enumerate(cell.arrows):
-                #clue_pos = tuple(
-                #    x + y for x, y in zip((cell.row, cell.col), ArrowDetector.TEMPLATE_MAP[arrow.direction]["source_vector"]))
+        LOG.info(f"assembling arrow fields with clue field...")
 
+        for cell in board.arrow_cells:
+            for arrow in cell.arrows:
+                LOG.debug(f"cell[{cell.row},{cell.col}]:")
                 source_vec = ArrowDetector.VECTOR_MAP[arrow.direction]["source_vector"]
+                LOG.debug(f"\tarrow {arrow} with source vector {source_vec}")
+
                 clue_pos = tuple((cell.row + source_vec[0], cell.col + source_vec[1]))
+                LOG.debug(f"\tpossible clue pos: {clue_pos}")
 
                 clue_cell = board.cell_at(clue_pos[0], clue_pos[1])
                 if not clue_cell:
+                    LOG.debug(f"clue cell could not be found")
                     continue
 
+                LOG.debug(f"\tclue cell found")
+
                 dir_row, dir_col = ArrowDetector.VECTOR_MAP[arrow.direction]["direction"]
+                LOG.debug(f"path direction {tuple((dir_row,dir_col))}")
 
                 path = [(cell.row, cell.col)]
                 nr, nc = cell.row + dir_row, cell.col + dir_col
@@ -374,15 +379,14 @@ class SwedishPuzzleSolver(ImageProcessor):
                     path.append((nr, nc))
                     nr, nc = nr + dir_row, nc + dir_col
 
+                clue = clue_cell.clues[0]
                 if len(clue_cell.clues) > 1:
                     if source_vec[0] == 0:
-                        clue_cell.clues[1].path = path
-                    else:
-                        clue_cell.clues[0].path = path
-                else:
-                    clue_cell.clues[0].path = path
+                        clue = clue_cell.clues[1]
 
-                idx += 1
+                clue.path = path
+
+                LOG.debug(f"path with len {len(path)} attached to clue [{clue}]")
 
     def build_board(self, image_path:str) -> None:
 
@@ -394,6 +398,8 @@ class SwedishPuzzleSolver(ImageProcessor):
         if not os.access(image_path, os.R_OK):
             raise ValueError(f"Error: The file '{image_path}' is not readable. Check file permissions.")
 
+        LOG.info(f"analysing {image_path}, please stand by...")
+
         self.__orig_img = cv2.imread(image_path)
         binary = self.preprocess(self.__orig_img)
 
@@ -403,9 +409,16 @@ class SwedishPuzzleSolver(ImageProcessor):
         self.board = Board(warped=self.__warped_img)
 
         # build board and classify all cells
+        LOG.info(f"extracting cells...")
         self.__extract_cells(self.__warped_img)
 
-        self.print_grid(img=self.__warped_img, cells=self.board.cells, debug=True)
+        if LOG.getEffectiveLevel() == logging.DEBUG:
+            self.print_grid(img=self.__warped_img, cells=self.board.cells, debug=True)
+
+        # link each clue to its arrow‐cell & build paths
+        self.__build_paths_and_attach(self.board)
+
+        LOG.info(f"{image_path} successfully analysed")
 
     @staticmethod
     def print_grid(img:np.ndarray, cells:List[List[Cell]], debug=False):
@@ -504,7 +517,6 @@ class SwedishPuzzleSolver(ImageProcessor):
                                 thickness=3,
                                 lineType=cv2.LINE_AA)
 
-        # cv2.imwrite("debug_cells.png", vis)
         cv2.imshow("Board", vis)
         cv2.waitKey(0)
         cv2.destroyAllWindows()
@@ -605,9 +617,7 @@ class SwedishPuzzleSolver(ImageProcessor):
 
     def solve(self, debug=False):
 
-        # link each Clue to its arrow‐cell & build paths
-        self.__build_paths_and_attach(self.board)
-
+        LOG.info("trying to solve this riddle")
         if debug:
             slots_by_id = {s.id: s for s in self.board.clues}  # lookup table for clues
             # for debug test answers fpr schwede_2.jpg
@@ -691,18 +701,23 @@ class SwedishPuzzleSolver(ImageProcessor):
 
         else:
             # lookup candidates online
+            LOG.info("hoping for answers...")
             for clue_cell in self.board.clue_cells:
-                clue_cell.lookup_answers(True)
+                clue_cell.lookup_answers()
 
         for clue in self.board.clues:
             # take all candidates as remaining
             clue.remaining = clue.candidates.copy()
 
+        LOG.info("answers are being processed...")
+
         self.__build_neighbour_map(self.board.clues)
 
-        sol = self.__solve_backtrack(self.board.clues, debug)
+        sol = self.__solve_backtrack(self.board.clues)
         if sol is None:
             return False
+
+        LOG.info("were done!")
 
         # fill in answers
         for clue in self.board.clues:
@@ -713,7 +728,7 @@ class SwedishPuzzleSolver(ImageProcessor):
 
         return True
 
-    def __solve_backtrack(self, clues:List[Clue], debug=False) -> Optional[Dict[str, str]]:
+    def __solve_backtrack(self, clues:List[Clue]) -> Optional[Dict[str, str]]:
         """
         Backtracking solver that tries to find the assignment
         which fills the maximum number of slots.
@@ -724,13 +739,12 @@ class SwedishPuzzleSolver(ImageProcessor):
         """
         best: Dict[str, str] = {}  # global best
 
-        def dfs(assignment:Dict[str, str], depth=0, debug=False) -> None:
+        def dfs(assignment:Dict[str, str], depth=0) -> None:
             nonlocal best
 
             if len(assignment) > len(best):
                 best = assignment.copy()
-                if debug:
-                    print(f'{" " * depth}new best assignment ({len(best)}/{len(clues)})')
+                LOG.debug(f'{" " * depth}new best assignment ({len(best)}/{len(clues)})')
 
             # Filter open clues: not assigned and with remaining candidates
             open_clues = [c for c in clues if c.id not in assignment and c.remaining]
@@ -748,22 +762,19 @@ class SwedishPuzzleSolver(ImageProcessor):
             words.sort(key=lambda word: self.__lcv_score(word, clue, clues, assignment))
 
             for word in words:
-                if debug:
-                    print(f'{"  " * depth}try {word}')
+                LOG.debug(f'{"  " * depth}try {word}')
 
                 assignment[clue.id] = word
-                if debug:
-                    print(f'{"  " * depth}ok')
+                LOG.debug(f'{"  " * depth}ok')
 
                 dfs(assignment, depth + 1)
 
-                if debug:
-                    print(f'{"  " * depth}{word} dismissed')
+                LOG.debug(f'{"  " * depth}{word} dismissed')
 
                 del assignment[clue.id]  # Backtrack
 
         # start depth-first search
-        dfs({}, debug=debug)
+        dfs({})
 
         return best
 
@@ -825,20 +836,45 @@ class SwedishPuzzleSolver(ImageProcessor):
         return score
 
 def main(args: list[str]) -> None:
-    # result_path = Path("test")
-    # result_path.mkdir(exist_ok=True)
 
-    solver = SwedishPuzzleSolver()
-
+    # take lang ressource from res dir
     os.putenv("TESSDATA_PREFIX", "res")
 
-    solver.build_board("test/schwede_4.jpg")
+    parser = argparse.ArgumentParser(
+        description="This little program solves the crossword puzzle with a little magic and a lot of luck.",
+        epilog="Thanks for trying!"
+    )
 
-    if not solver.solve(debug=False):
-        print("No solution found.")
-        return
+    parser.add_argument(
+        "-v", "--verbose",
+        action="store_true",
+        help="enables verbose output - only useful when troubleshooting issues"
+    )
 
-    solver.print_grid(img=solver.board.warped, cells=solver.board.cells)
+    parser.add_argument(
+        "puzzle_image_path",
+        nargs="+",
+        help="path to the puzzle image"
+    )
+
+    args = parser.parse_args()
+
+    if args.verbose:
+        LOG.setLevel(logging.DEBUG)
+
+    try:
+        solver = SwedishPuzzleSolver()
+
+        for img_path in args.puzzle_image_path:
+            solver.build_board(img_path)
+
+            if not solver.solve(debug=False):
+                print(f"No solution found for puzzle {img_path}.")
+                continue
+
+            solver.print_grid(img=solver.board.warped, cells=solver.board.cells)
+    except Exception as ex:
+        LOG.error(ex)
 
 if __name__ == "__main__":
     main(sys.argv)

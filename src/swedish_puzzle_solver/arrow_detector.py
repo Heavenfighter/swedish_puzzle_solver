@@ -18,7 +18,10 @@ class Arrow:
         self.direction = direction
 
     def __str__(self):
-        print(self.direction.value if self.direction else "None")
+        return self.direction.value if self.direction else ""
+
+    def __repr__(self):
+        return self.__str__()
 
 class ArrowDetector:
     VECTOR_MAP = {
@@ -317,75 +320,6 @@ class ArrowDetector:
                 #       break
         return arrows
 
-    # deprecated
-    def detect_black_lines_near_edges_old(self, image, threshold=130, edge_search_depth=5,
-                                          line_thickness=1, debug=False) -> Tuple[List[str], Dict[str, bool]]:
-        """
-        Detects on which side(s) of a grayscale image black lines are present near the border.
-        Can return multiple sides if black lines are found on more than one edge.
-
-        :param image: Grayscale image (np.ndarray)
-        :param threshold: Pixel intensity below which a pixel is considered "black"
-        :param edge_search_depth: How far from the edge (in pixels) to search inward
-        :param line_thickness: Minimum height/width of a contour to be considered a line
-        :param debug: If True, display a debug image with markings
-        :return: A list of detected sides (e.g., ['top', 'right']) or empty list if none found
-        """
-
-        if len(image.shape) != 2 or image.dtype != np.uint8:
-            raise ValueError("Input must be a grayscale image).")
-
-        height, width = image.shape
-        original_image = image.copy()
-
-        # create binary mask
-        mask = (image < threshold).astype(np.uint8) * 255
-
-        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-
-        # Initialize result dict with all sides set to False
-        side_flags = {'top': False, 'bottom': False, 'left': False, 'right': False}
-        # check each contour's bounding box against edges
-        for cnt in contours:
-            x, y, w, h = cv2.boundingRect(cnt)
-
-            if y <= edge_search_depth and h >= line_thickness:
-                side_flags['top'] = True
-            if y + h >= height - edge_search_depth and h >= line_thickness:
-                side_flags['bottom'] = True
-            if x <= edge_search_depth and w >= line_thickness:
-                side_flags['left'] = True
-            if x + w >= width - edge_search_depth and w >= line_thickness:
-                side_flags['right'] = True
-
-        # Ordered list of detected sides
-        ordered_sides = [side for side in ['top', 'bottom', 'left', 'right'] if side_flags[side]]
-
-        if debug:
-            vis = cv2.cvtColor(original_image.copy(), cv2.COLOR_GRAY2BGR)
-            overlay = vis.copy()
-            alpha = 0.4
-            color = (0, 0, 255)
-
-            if side_flags['top']:
-                cv2.rectangle(overlay, (0, 0), (width, edge_search_depth), color, -1)
-            if side_flags['bottom']:
-                cv2.rectangle(overlay, (0, height - edge_search_depth), (width, height), color, -1)
-            if side_flags['left']:
-                cv2.rectangle(overlay, (0, 0), (edge_search_depth, height), color, -1)
-            if side_flags['right']:
-                cv2.rectangle(overlay, (width - edge_search_depth, 0), (width, height), color, -1)
-
-            debug_img = cv2.addWeighted(overlay, alpha, vis, 1 - alpha, 0)
-            cv2.drawContours(debug_img, contours, -1, (0, 255, 0), 1)
-
-            cv2.imshow(f'Debug', debug_img)
-            cv2.waitKey(0)
-            cv2.destroyAllWindows()
-
-        return ordered_sides, side_flags
-
     def detect_black_lines_near_edges(self, image, threshold=127,
                                       tolerance=0, debug=False) -> Tuple[List[str], Dict[str, bool]]:
         """
@@ -408,14 +342,9 @@ class ArrowDetector:
         height, width = image.shape
         original_image = image.copy()
 
-        # filtering light grey tones
-        lower_threshold = 127
-        upper_threshold = threshold - 1
-        mask = (image > lower_threshold) & (image < upper_threshold)
-        image[mask] = 255
+        blur = cv2.GaussianBlur(image, (3, 3), 0)
 
-        # binary mask where pixels below threshold are considered black
-        mask = (image < threshold).astype(np.uint8) * 255
+        _, mask = cv2.threshold(blur, threshold, 255, cv2.THRESH_BINARY_INV)
 
         # store the distances to the first black pixel found
         distances = {'top': None, 'bottom': None, 'left': None, 'right': None}
