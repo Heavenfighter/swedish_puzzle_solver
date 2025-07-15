@@ -302,8 +302,9 @@ class SwedishPuzzleSolver(ImageProcessor):
                 #                                           debug=(row_idx==4 and col_idx==1)))
 
                 # treshold 127 for cells with light circles
-                _, arrow_source_sides_dict = detector.detect_black_lines_near_edges(image=resized_up, threshold=170,
-                                                                                    tolerance=2)
+                _, arrow_source_sides_dict = (
+                    detector.detect_black_lines_near_edges(image=resized_up,
+                                                           threshold=170, tolerance=2))
 
                 if not any(arrow_source_sides_dict.values()) or sum(1 for value in arrow_source_sides_dict.values() if value) != len(arrows):
                     raise ValueError("arrow source could not be determined!")
@@ -461,16 +462,23 @@ class SwedishPuzzleSolver(ImageProcessor):
                     # draw arrow name
                     if isinstance(cell, LetterCell) and cell.has_arrow:
 
+                        text = ""
                         for arrow in cell.arrows:
-                            # calculate orig text size
-                            (text_width, text_height), baseline = cv2.getTextSize(arrow.direction.value, cv2.FONT_HERSHEY_SIMPLEX,
-                                                                                  fontScale=0.3, thickness=1)
 
-                            cv2.putText(vis, arrow.direction.value,
-                                        (cell.top_left[0] + 3, cell.bottom_right[1] - text_height - 3),
-                                        cv2.FONT_HERSHEY_SIMPLEX, fontScale=0.3, color=(0, 0, 0),
-                                        thickness=1,
-                                        lineType=cv2.LINE_AA)
+                            if text:
+                                text += ", "
+
+                            text += arrow.direction.value
+
+                        # calculate orig text size
+                        (text_width, text_height), baseline = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX,
+                                                                              fontScale=0.3, thickness=1)
+
+                        cv2.putText(vis, text,
+                                    (cell.top_left[0] + 3, cell.bottom_right[1] - text_height - 3),
+                                    cv2.FONT_HERSHEY_SIMPLEX, fontScale=0.3, color=(0, 0, 0),
+                                    thickness=1,
+                                    lineType=cv2.LINE_AA)
 
                 if cell.letter:
                     img_height, img_width = cell.image.shape[:2]
