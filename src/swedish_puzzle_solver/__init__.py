@@ -388,7 +388,7 @@ class SwedishPuzzleSolver(ImageProcessor):
                 # therefore only one pixel tolerance
                 _, arrow_source_sides_dict = (
                     detector.detect_black_lines_near_edges(image=resized_up,
-                                                           threshold=180, tolerance=1, debug=(col_idx==6 and row_idx==6)))
+                                                           threshold=180, tolerance=1))
 
                 if (not any(arrow_source_sides_dict.values()) or
                         sum(1 for value in arrow_source_sides_dict.values() if value) != len(arrows)):
