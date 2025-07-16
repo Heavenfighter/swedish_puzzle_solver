@@ -34,7 +34,7 @@ class OnlineSolver:
         self.source_functions: List[Callable[[any, any], List[str]]] = [
             self._get_from_kreuzwort_net,
             self._get_from_wort_suchen,
-            #self._get_from_woxikon,
+            self._get_from_woxikon,
         ]
 
         self.lang = lang
@@ -106,6 +106,8 @@ class OnlineSolver:
                 return []
 
             data_json = json.loads(answers.attrs['data-answers'])
+
+            #if str(word_length) in data_json:
             answers = data_json[str(word_length)]
 
             for answer in answers.keys():
@@ -125,7 +127,7 @@ class OnlineSolver:
         for cnt in range(word_length):
             letters.append("")
 
-        query = replace_umlauts(hint_text.replace(",", ""))
+        query = replace_umlauts(hint_text.replace(",", "").replace(".", "").replace(":", ""))
         query = query.strip().upper().replace(" ", "-")
 
         url = f"https://www.woxikon.de/kreuzwortraetsel-hilfe/frage/{query}"
@@ -158,11 +160,19 @@ class OnlineSolver:
         finally:
             return candidates
 
-    def lookup_answers_online(self, hint_text: str, word_length=None):
+    def lookup_answers_online(self, hint_text: str, word_length=None, use_threads:bool=False):
         all_results = []
 
-        all_results = run_functions_in_parallel( self.source_functions,
-            arg1=hint_text, arg2=word_length)
+        if use_threads:
+            all_results = run_functions_in_parallel( self.source_functions,
+                arg1=hint_text, arg2=word_length)
+        else:
+            for source_fn in self.source_functions:
+                try:
+                    words = source_fn(hint_text, word_length)
+                    all_results.extend(words)
+                except Exception as e:
+                    print(f"error at{source_fn.__name__}: {e}")
 
         # Duplikate entfernen, sortieren
         result = sorted(set(all_results))

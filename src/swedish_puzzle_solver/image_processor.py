@@ -437,11 +437,20 @@ class ImageProcessor:
         # remove borders
         without_borders = self.remove_border_artifacts(gray, thresh=240, max_coverage=0.03, max_thickness=5)
 
-        # enlarge for better results
-        #enlarged = cv2.resize(without_borders, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
+        # glätten
+        result = cv2.medianBlur(without_borders, 1)
 
-        # sharpen using unsharp masking
-        result = self.unsharp_mask(without_borders, amount=3.0)
+        # Unsharp Masking
+        result = self.unsharp_mask(result, amount=4)
+
+        # Globaler Threshold
+        _, result = cv2.threshold(result, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 1))
+        result = cv2.dilate(result, kernel, iterations=2)
+
+        closing_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 1))
+        result = cv2.morphologyEx(result, cv2.MORPH_CLOSE, closing_kernel)
 
         if debug:
             #cv2.imshow('input', gray)

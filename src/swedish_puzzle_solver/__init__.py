@@ -14,6 +14,8 @@ import cv2
 import numpy as np
 import sqlite3
 import json
+import time
+import traceback
 
 from pathlib import Path
 from typing import List, Tuple, Optional, Dict, Final
@@ -89,13 +91,17 @@ class ClueCell(Cell):
         self.type = Celltype.CLUE
         self._solver = OnlineSolver()
 
-    def lookup_answers(self) -> None:
+    def lookup_answers(self, use_threads:bool=False) -> None:
         db_conn = sqlite3.connect(DB_PATH)
-        cursor = db_conn.cursor() if db_conn else None
+        cursor = None
+        if db_conn:
+            db_conn.execute("PRAGMA journal_mode = WAL")
+            db_conn.execute("PRAGMA synchronous  = NORMAL")
+            cursor = db_conn.cursor()
 
         for clue in self.clues:
             try:
-                LOG.debug(f"searching {clue.id} ({len(clue.path)})")
+                LOG.debug(f"searching {clue.text} ({len(clue.path)})")
 
                 row = None
                 if cursor:
@@ -103,7 +109,7 @@ class ClueCell(Cell):
                     row = cursor.fetchone()
 
                 if not row:
-                    clue.add_candidates(self._solver.lookup_answers_online(clue.id, len(clue.path)))
+                    clue.add_candidates(self._solver.lookup_answers_online(clue.text, len(clue.path), use_threads))
 
                     if cursor and clue.candidates:
                         cursor.execute("INSERT OR REPLACE INTO clues (id, solutions) VALUES (?, ?)", (clue.id, json.dumps(clue.candidates)))
@@ -111,12 +117,19 @@ class ClueCell(Cell):
                     clue.candidates = json.loads(row[1])
             except Exception as ex:
                 LOG.error(ex, exc_info=True)
+                if db_conn:
+                    db_conn.commit()
+                    db_conn.close()
             finally:
-                db_conn.close() if db_conn else None
                 LOG.debug(clue.candidates)
 
                 # take all candidates as remaining
                 clue.remaining = clue.candidates.copy()
+
+        if db_conn:
+            db_conn.commit()
+            db_conn.close()
+            time.sleep(1)
 
     def add_clue(self, text:str):
         clue = Clue(text, self)
@@ -124,7 +137,8 @@ class ClueCell(Cell):
 
 class Clue:
     def __init__(self, text:str, cell:ClueCell):
-        self.id = text
+        self.id = f"{text}_{cell.row}_{cell.col}"
+        self.text = text
         self.candidates: List[str] = []
         self.path: List[Tuple[int, int]] = []
         self.clue_cell = cell
@@ -260,7 +274,7 @@ class SwedishPuzzleSolver(ImageProcessor):
             row.append(cell)
         return row_idx, row
 
-    def __extract_cells(self, img_warped:np.ndarray) -> None:
+    def __extract_cells(self, img_warped:np.ndarray, use_threads:bool=False) -> None:
         horiz, vert = self.detect_grid_lines(img_warped)
         inters = cv2.bitwise_and(horiz, vert)
 
@@ -270,26 +284,28 @@ class SwedishPuzzleSolver(ImageProcessor):
 
         self.board.cells.clear()
 
-        #self.board.cells = [None] * (len(rows) - 1)  # Ergebnisliste vorbereiten
-        #with ThreadPoolExecutor(max_workers=8) as executor:
-        #    futures = [
-        #        executor.submit(self._process_row, row_idx, y1, y2, cols, img_warped)
-        #            for row_idx, (y1, y2) in enumerate(zip(rows[:-1], rows[1:]))
-        #    ]
+        if use_threads:
+            self.board.cells = [None] * (len(rows) - 1)  # Ergebnisliste vorbereiten
+            with ThreadPoolExecutor(max_workers=8) as executor:
+                futures = [
+                    executor.submit(self._process_row, row_idx, y1, y2, cols, img_warped)
+                        for row_idx, (y1, y2) in enumerate(zip(rows[:-1], rows[1:]))
+                ]
 
-        #    for future in as_completed(futures):
-        #        row_idx, row = future.result()
-        #        self.board.cells[row_idx] = row
+                for future in as_completed(futures):
+                    row_idx, row = future.result()
+                    self.board.cells[row_idx] = row
+        else:
+            for row_idx, (y1, y2) in enumerate(zip(rows[:-1], rows[1:])):
+                row = []
+                for col_idx, (x1, x2) in enumerate(zip(cols[:-1], cols[1:])):
+                    img_cell = img_warped[y1:y2, x1:x2]
+                    cell = self.__classify_cell(row_idx, col_idx, img_cell)
+                    cell.set_position((x1, y1), (x2, y2))
+                    row.append(cell)
 
-        for row_idx, (y1, y2) in enumerate(zip(rows[:-1], rows[1:])):
-            row = []
-            for col_idx, (x1, x2) in enumerate(zip(cols[:-1], cols[1:])):
-                img_cell = img_warped[y1:y2, x1:x2]
-                cell = self.__classify_cell(row_idx, col_idx, img_cell)
-                cell.set_position((x1, y1), (x2, y2))
-                row.append(cell)
+                self.board.cells.append(row)
 
-            self.board.cells.append(row)
         self.board.slots_by_id = {c.id: c for c in self.board.clues}
 
     def __classify_cell(self, row_idx: int, col_idx: int, cell_img:np.ndarray) -> Cell:
@@ -319,7 +335,7 @@ class SwedishPuzzleSolver(ImageProcessor):
         # Convert to grayscale
         gray = cv2.cvtColor(cell_img, cv2.COLOR_BGR2GRAY)
 
-        # pre-classify with white ratio
+        # pre-classify with dark ratio
         dark_ratio = self.get_cell_dark_ratio(gray)
 
         LOG.debug(f'\tdark_ratio: {dark_ratio}')
@@ -372,11 +388,11 @@ class SwedishPuzzleSolver(ImageProcessor):
                 # therefore only one pixel tolerance
                 _, arrow_source_sides_dict = (
                     detector.detect_black_lines_near_edges(image=resized_up,
-                                                           threshold=50, tolerance=1))
+                                                           threshold=180, tolerance=1, debug=(col_idx==6 and row_idx==6)))
 
                 if (not any(arrow_source_sides_dict.values()) or
                         sum(1 for value in arrow_source_sides_dict.values() if value) != len(arrows)):
-                    raise ValueError("arrow source could not be determined!")
+                    raise ValueError(f"arrow source could not be determined at {(row_idx,col_idx)}!")
 
                 # with two arrows in one cell, we have to conclude the right direction
                 # arrow[0]: always down
@@ -480,7 +496,7 @@ class SwedishPuzzleSolver(ImageProcessor):
 
         # build board and classify all cells
         LOG.info(f"extracting cells...")
-        self.__extract_cells(self.__warped_img)
+        self.__extract_cells(self.__warped_img, use_threads=True)
         LOG.info(f"{sum(map(len, self.board.cells))} cells found")
 
         if LOG.getEffectiveLevel() == logging.DEBUG:
@@ -686,7 +702,7 @@ class SwedishPuzzleSolver(ImageProcessor):
 
         return best
 
-    def solve(self, debug=False):
+    def solve(self, debug=False, use_threads:bool=False) -> None:
 
         LOG.info("trying to solve this riddle")
         if debug:
@@ -773,19 +789,22 @@ class SwedishPuzzleSolver(ImageProcessor):
         else:
             # lookup candidates online
             LOG.info("hoping for answers...")
+            if use_threads:
+                with ThreadPoolExecutor(max_workers=5) as executor:
+                    # Dictionary zum Zuordnen der Futures zu ihren Funktionen
+                    future_to_obj = {
+                        executor.submit(clue_cell.lookup_answers, use_threads): clue_cell for clue_cell in self.board.clue_cells
+                    }
 
-            with ThreadPoolExecutor(max_workers=5) as executor:
-                # Dictionary zum Zuordnen der Futures zu ihren Funktionen
-                future_to_obj = {
-                    executor.submit(clue_cell.lookup_answers): clue_cell for clue_cell in self.board.clue_cells
-                }
-
-                for future in as_completed(future_to_obj):
-                    obj = future_to_obj[future]
-                    try:
-                        future.result()
-                    except Exception as ex:
-                        LOG.error(f"Object {obj} failed: {ex}")
+                    for future in as_completed(future_to_obj):
+                        obj = future_to_obj[future]
+                        try:
+                            future.result()
+                        except Exception as ex:
+                            LOG.error(f"Object {obj} failed: {ex}")
+            else:
+                for clue_cell in self.board.clue_cells:
+                    clue_cell.lookup_answers(use_threads)
 
         LOG.info("answers are being processed...")
 
@@ -820,36 +839,40 @@ class SwedishPuzzleSolver(ImageProcessor):
         def dfs(assignment:Dict[str, str], depth=0) -> None:
             nonlocal best
 
-            if len(assignment) > len(best):
-                best = assignment.copy()
-                LOG.debug(f'{" " * depth}new best assignment ({len(best)}/{len(clues)})')
+            try:
+                if len(assignment) > len(best):
+                    best = assignment.copy()
+                    LOG.debug(f'{" " * depth}new best assignment ({len(best)}/{len(clues)})')
 
-            # Filter open clues: not assigned and with remaining candidates
-            open_clues = [c for c in clues if c.id not in assignment and c.remaining]
-            if not open_clues:
-                return
+                # Filter open clues: not assigned and with remaining candidates
+                open_clues = [c for c in clues if c.id not in assignment and c.remaining]
+                if not open_clues:
+                    return
 
-            # Select the next slot to assign (using MRV heuristic)
-            clue = self.__select_next_clue(open_clues, assignment)
-            if clue is None:
-                return
+                # Select the next slot to assign (using MRV heuristic)
+                clue = self.__select_next_clue(open_clues, assignment)
+                if clue is None:
+                    return
 
-            words = clue._cmp_cache
+                words = clue._cmp_cache
 
-            # Sort candidates by least constraining value (LCV)
-            words.sort(key=lambda word: self.__lcv_score(word, clue, clues, assignment))
+                # Sort candidates by least constraining value (LCV)
+                words.sort(key=lambda word: self.__lcv_score(word, clue, clues, assignment))
 
-            for word in words:
-                LOG.debug(f'{"  " * depth}try {word}')
+                for word in words:
+                    LOG.debug(f'{"  " * depth}try {word}')
 
-                assignment[clue.id] = word
-                LOG.debug(f'{"  " * depth}ok')
+                    assignment[clue.id] = word
+                    LOG.debug(f'{"  " * depth}ok')
 
-                dfs(assignment, depth + 1)
+                    dfs(assignment, depth + 1)
 
-                LOG.debug(f'{"  " * depth}{word} dismissed')
+                    LOG.debug(f'{"  " * depth}{word} dismissed')
 
-                del assignment[clue.id]  # Backtrack
+                    del assignment[clue.id]  # Backtrack
+            except Exception as ex:
+                LOG.error(ex, exc_info=True)
+                print(traceback.format_exc())
 
         # start depth-first search
         dfs({})
@@ -950,7 +973,7 @@ def main(args: list[str]) -> None:
         for img_path in args.puzzle_image_path:
             solver.build_board(img_path)
 
-            if not solver.solve(debug=False):
+            if not solver.solve(debug=False, use_threads=True):
                 print(f"No solution found for puzzle {img_path}.")
                 continue
 

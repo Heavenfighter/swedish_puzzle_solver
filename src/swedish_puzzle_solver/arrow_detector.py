@@ -1,4 +1,5 @@
 import enum
+from itertools import combinations
 from typing import Dict, List, Any, Optional, Tuple
 
 import cv2
@@ -342,9 +343,29 @@ class ArrowDetector:
         height, width = image.shape
         original_image = image.copy()
 
+        # blurring to reduce noise
         blur = cv2.GaussianBlur(image, (3, 3), 0)
 
-        _, mask = cv2.threshold(blur, threshold, 255, cv2.THRESH_BINARY_INV)
+        # detect 'elements' in cell like circles or arrows
+        # some arrow lines are brighter than circles, they
+        # have a higher lower-bound as circles
+        # e.g. thin arrow -> 160, ring -> 128
+        # So we select all in range and count pixels
+        lower, upper = 125, 170
+        mask = cv2.inRange(blur, lower, upper)
+        cnt = cv2.countNonZero(mask)
+
+        if cnt > 300:  # a ring takes more pixels (approx. 1000) than only an arrow (approx. 200)
+            # remove ring
+            mask = cv2.inRange(blur, 128, 255) # new mask only for the ring
+
+            dark = cv2.inRange(blur, 0, 60) # dark mask to prevent arrow
+            mask = cv2.bitwise_and(mask, cv2.bitwise_not(dark))
+
+            blur[mask > 0] = 255 # all to white in blurred
+
+        # now generate threshold mask for the arrow
+        _, tresh = cv2.threshold(blur, threshold, 255, cv2.THRESH_BINARY_INV)
 
         # store the distances to the first black pixel found
         distances = {'top': None, 'bottom': None, 'left': None, 'right': None}
@@ -352,25 +373,25 @@ class ArrowDetector:
         # Search for the first black pixel on each side and calculate the distance
         # Top: Search rows from top to bottom
         for y in range(height):
-            if np.any(mask[y, :] == 255):  # Find if any pixel in the row is black
+            if np.any(tresh[y, :] == 255):  # Find if any pixel in the row is black
                 distances['top'] = y
                 break
 
         # Bottom: Search rows from bottom to top
         for y in range(height - 1, -1, -1):  # Start from the bottom row
-            if np.any(mask[y, :] == 255):  # Find if any pixel in the row is black
+            if np.any(tresh[y, :] == 255):  # Find if any pixel in the row is black
                 distances['bottom'] = height - 1 - y
                 break
 
         # Left: Search columns from left to right
         for x in range(width):
-            if np.any(mask[:, x] == 255):  # Find if any pixel in the column is black
+            if np.any(tresh[:, x] == 255):  # Find if any pixel in the column is black
                 distances['left'] = x
                 break
 
         # Right: Search columns from right to left
         for x in range(width - 1, -1, -1):  # Start from the right column
-            if np.any(mask[:, x] == 255):  # Find if any pixel in the column is black
+            if np.any(tresh[:, x] == 255):  # Find if any pixel in the column is black
                 distances['right'] = width - 1 - x
                 break
 
@@ -378,7 +399,7 @@ class ArrowDetector:
         valid_distances = {side: dist for side, dist in distances.items() if dist is not None}
 
         if debug:
-            cv2.imshow(f'Debug', mask)
+            cv2.imshow(f'Debug', tresh)
             cv2.waitKey(0)
             cv2.destroyAllWindows()
 
@@ -393,6 +414,25 @@ class ArrowDetector:
 
         # dictionary indicating if the side was detected (True or False)
         side_flags = {side: side in valid_sides for side in distances}
+
+        #check for main contact sides, if multiple sides
+        if sum(1 for value in side_flags.values() if value) > 1:
+
+            # count pixel on contact sides
+            counts = {
+                "left": int(np.count_nonzero(tresh[:, 0]+tolerance)),
+                "right": int(np.count_nonzero(tresh[:, -1-tolerance])),
+                "top": int(np.count_nonzero(tresh[0+tolerance, :])),
+                "bottom": int(np.count_nonzero(tresh[-1-tolerance, :])),
+            }
+
+            abs_min = 10  # min number of pixels to be considered a contact
+            valid_sides = [
+                side for side, pixel_count in counts.items()
+                if pixel_count >= abs_min
+            ]
+
+            side_flags = {side: side in valid_sides for side in distances}
 
         if debug:
             vis = cv2.cvtColor(original_image.copy(), cv2.COLOR_GRAY2BGR)

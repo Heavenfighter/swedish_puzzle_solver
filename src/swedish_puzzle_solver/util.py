@@ -2,6 +2,7 @@
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Callable, List, Any, Final
 import logging
+import time
 import traceback
 
 LOG:Final[logging.Logger] = logging.getLogger(__name__)
@@ -33,6 +34,7 @@ def run_functions_in_parallel(
             try:
                 result = future.result()
                 results.extend(result)
+                time.sleep(1)
             except Exception as e:
                 traceback.print_exc()
                 LOG.exception(f"Function '{func.__name__}' raised an exception: {e}")
