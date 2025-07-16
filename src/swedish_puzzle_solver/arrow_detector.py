@@ -346,19 +346,17 @@ class ArrowDetector:
         # blurring to reduce noise
         blur = cv2.GaussianBlur(image, (3, 3), 0)
 
-        # detect 'elements' in cell like circles or arrows
+        # Detect 'elements' in cell like circles or arrows
         # some arrow lines are brighter than circles, they
         # have a higher lower-bound as circles
-        # e.g. thin arrow -> 160, ring -> 128
         # So we select all in range and count pixels
-        lower, upper = 125, 170
+        lower, upper = 125, 210
         mask = cv2.inRange(blur, lower, upper)
         cnt = cv2.countNonZero(mask)
 
-        if cnt > 300:  # a ring takes more pixels (approx. 1000) than only an arrow (approx. 200)
+        if cnt > 300:  # a ring has more pixels in mask area, than only an arrow
             # remove ring
             mask = cv2.inRange(blur, 128, 255) # new mask only for the ring
-
             dark = cv2.inRange(blur, 0, 60) # dark mask to prevent arrow
             mask = cv2.bitwise_and(mask, cv2.bitwise_not(dark))
 

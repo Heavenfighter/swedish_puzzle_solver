@@ -333,7 +333,10 @@ class SwedishPuzzleSolver(ImageProcessor):
         LOG.debug(f'analysing: row {row_idx} col {col_idx}')
 
         # Convert to grayscale
-        gray = cv2.cvtColor(cell_img, cv2.COLOR_BGR2GRAY)
+        if not self.is_grayscale(cell_img):
+            gray = cv2.cvtColor(cell_img, cv2.COLOR_BGR2GRAY)
+        else:
+            gray = cell_img
 
         # pre-classify with dark ratio
         dark_ratio = self.get_cell_dark_ratio(gray)
@@ -352,10 +355,7 @@ class SwedishPuzzleSolver(ImageProcessor):
 
             for gray_part_img in res["parts"]:
 
-                if col_idx == 0 and row_idx == 9:
-                    pass
-
-                text = self.extract_text(row_idx, col_idx, gray_part_img)
+                text = self.extract_text(gray_part_img, debug=True)
                 if text:
                     cell.add_clue(text)
                     LOG.debug(f'\tclues: {text}')
@@ -372,9 +372,6 @@ class SwedishPuzzleSolver(ImageProcessor):
             detector = ArrowDetector(enlarged)
             arrows = detector.find_arrows_with_template(match_threshold=0.87, min_black_fraction=0.05)
 
-            if row_idx == 0 and col_idx == 2:
-                pass
-
             if len(arrows):
                 # remove border artifacts by coloring dark pixel white
                 without_borders = self.remove_border_artifacts(gray, thresh=240, max_coverage=0.03)
@@ -388,7 +385,7 @@ class SwedishPuzzleSolver(ImageProcessor):
                 # therefore only one pixel tolerance
                 _, arrow_source_sides_dict = (
                     detector.detect_black_lines_near_edges(image=resized_up,
-                                                           threshold=180, tolerance=1))
+                                                           threshold=200, tolerance=1, debug=(row_idx==4 and col_idx==0)))
 
                 if (not any(arrow_source_sides_dict.values()) or
                         sum(1 for value in arrow_source_sides_dict.values() if value) != len(arrows)):
@@ -487,16 +484,18 @@ class SwedishPuzzleSolver(ImageProcessor):
         LOG.info(f"analysing {image_path}, please stand by...")
 
         self.__orig_img = cv2.imread(image_path)
+
+
         binary = self.preprocess(self.__orig_img)
-
         corners = self.find_grid_contour(binary)
-        self.__warped_img = self.warp(self.__orig_img, corners)
 
+        whitey = self.make_white(self.__orig_img)
+        self.__warped_img = self.warp(whitey, corners)
         self.board = Board(warped=self.__warped_img)
 
         # build board and classify all cells
         LOG.info(f"extracting cells...")
-        self.__extract_cells(self.__warped_img, use_threads=True)
+        self.__extract_cells(self.__warped_img, use_threads=False)
         LOG.info(f"{sum(map(len, self.board.cells))} cells found")
 
         if LOG.getEffectiveLevel() == logging.DEBUG:
