@@ -54,10 +54,10 @@ class ArrowDetector:
 
     TEMPLATE_MAP = {
         ArrowDirection.DOWN: {
-            "template_path": ["res/templates/down.png", "res/templates/down_2.png"],
+            "template_path": ["res/templates/down.png", "res/templates/down_2.png", "res/templates/down_3.png"],
         },
         ArrowDirection.RIGHT: {
-            "template_path": ["res/templates/right.png", "res/templates/right_2.png"],
+            "template_path": ["res/templates/right.png", "res/templates/right_2.png", "res/templates/right_3.png"],
         },
     }
 
@@ -105,6 +105,9 @@ class ArrowDetector:
         template_to_search_for = {k: v for k, v in all_templates.items() if
                                   k not in {ArrowDirection.DOWN, ArrowDirection.RIGHT} }
 
+        if debug:
+            pass
+
         while True:
             for direction, template_list in template_to_search_for.items():
 
@@ -147,7 +150,7 @@ class ArrowDetector:
                                 cv2.destroyAllWindows()
 
                             # Calculate fraction of black pixels (below threshold, e.g. < 100)
-                            black_pixels = np.sum(match_region < 100)
+                            black_pixels = np.sum(match_region < 110) # # 110 as a light dark value
                             total_pixels = match_region.size
                             black_fraction = black_pixels / total_pixels
 
@@ -313,9 +316,9 @@ class ArrowDetector:
             if direction:
                 print( "down" if direction == (0,1) else "right")
                 # If a direction was found, compute the target cell
-                #off_col, off_row = direction
-                #target_col, target_row = row_idx + off_col, col_idx + off_row
-                #for dir_str, dir in self.SOURCE_VECTOR.items():
+                # off_col, off_row = direction
+                # target_col, target_row = row_idx + off_col, col_idx + off_row
+                # for dir_str, dir in self.SOURCE_VECTOR.items():
                 #    if dir == direction:
                 #       arrows.append(Arrow(str(dir_str)))
                 #       break
@@ -324,7 +327,8 @@ class ArrowDetector:
     def detect_black_lines_near_edges(self, image, threshold=127,
                                       tolerance=0, debug=False) -> Tuple[List[str], Dict[str, bool]]:
         """
-        Detects on which side(s) of a grayscale image black lines are present near the border.
+        Detects on which side(s) of a grayscale image black lines are present near,
+        or touches the border.
         Searches for the first black pixel from the edge inwards, and selects the side(s)
         with the smallest distance to the black pixel found. If multiple sides are within
         the tolerance range of the smallest distance, they are all considered valid.
@@ -346,26 +350,30 @@ class ArrowDetector:
         # blurring to reduce noise
         blur = cv2.GaussianBlur(image, (3, 3), 0)
 
-        # detect 'elements' in cell like circles or arrows
-        # some arrow lines are brighter than circles, they
+        # Detect 'elements' in cell like circles or arrows.
+        # Some arrow lines are brighter than circles, they
         # have a higher lower-bound as circles
-        # e.g. thin arrow -> 160, ring -> 128
         # So we select all in range and count pixels
-        lower, upper = 125, 170
+        lower, upper = 165, 210         #125,210
         mask = cv2.inRange(blur, lower, upper)
         cnt = cv2.countNonZero(mask)
 
-        if cnt > 300:  # a ring takes more pixels (approx. 1000) than only an arrow (approx. 200)
+        if cnt > 300:  # a ring has more pixels in mask area, than only an arrow
             # remove ring
-            mask = cv2.inRange(blur, 128, 255) # new mask only for the ring
+            mask = cv2.inRange(blur, 160, 255) # new mask only for the ring
 
-            dark = cv2.inRange(blur, 0, 60) # dark mask to prevent arrow
+            dark = cv2.inRange(blur, 0, 130) # dark mask to prevent arrow
             mask = cv2.bitwise_and(mask, cv2.bitwise_not(dark))
 
             blur[mask > 0] = 255 # all to white in blurred
 
         # now generate threshold mask for the arrow
         _, tresh = cv2.threshold(blur, threshold, 255, cv2.THRESH_BINARY_INV)
+
+        if debug:
+            cv2.imshow(f'Debug', tresh)
+            cv2.waitKey(0)
+            cv2.destroyAllWindows()
 
         # store the distances to the first black pixel found
         distances = {'top': None, 'bottom': None, 'left': None, 'right': None}
@@ -397,12 +405,6 @@ class ArrowDetector:
 
         # determine the smallest distance(s)
         valid_distances = {side: dist for side, dist in distances.items() if dist is not None}
-
-        if debug:
-            cv2.imshow(f'Debug', tresh)
-            cv2.waitKey(0)
-            cv2.destroyAllWindows()
-
         if not valid_distances:
             return [], {side: False for side in distances}
 

@@ -11,14 +11,16 @@ class ImageProcessor:
     def __init__(self) -> None:
         self._spellchecker = SpellChecker(language='de')
 
-    def preprocess(self, img) -> np.ndarray:
+    def preprocess(self, img:np.ndarray) -> np.ndarray:
         """
         Convert image to a binary mask highlighting grid lines.
 
         Steps:
-          1. Grayscale
-          2. Gaussian blur
-          3. Adaptive threshold (binary inverse)
+            1. convert to grayscale
+            2. denoising
+            3. normalising histogram
+            4. adaptive threshold (binary inverse)
+            5. fill small holes
 
         Args:
             img (np.ndarray): Input BGR image.
@@ -27,14 +29,35 @@ class ImageProcessor:
             np.ndarray: Binary image.
         """
         tmp_img = img.copy()
-
         gray = cv2.cvtColor(tmp_img, cv2.COLOR_BGR2GRAY)
-        blur = cv2.GaussianBlur(gray, (3, 3), 0)
 
-        return cv2.adaptiveThreshold(blur, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-                                    cv2.THRESH_BINARY_INV, 11, 2)
+        #denoise
+        gray = cv2.fastNlMeansDenoising(gray, h=15)
 
-    def find_grid_contour(self, bin_img) -> np.ndarray:
+        #normalise
+        #gray = cv2.normalize(gray, None, 0, 255, cv2.NORM_MINMAX)
+
+        thresh = cv2.adaptiveThreshold(
+            gray, 255,
+            cv2.ADAPTIVE_THRESH_GAUSSIAN_C,  # Gauß stabilisiert bei weichen Kanten
+            cv2.THRESH_BINARY_INV,
+            blockSize=35,  # > doppelte Zellbreite
+            C=5  # nur wenig abziehen
+        )
+
+        # fill small holes
+        kernel = np.ones((3, 3), np.uint8)
+        thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel, iterations=1)
+
+        return thresh
+
+    def is_grayscale(self, image:np.ndarray) -> bool:
+        if len(image.shape) == 2:
+            return True  # already grayscale
+
+        return False
+
+    def find_grid_contour(self, bin_img:np.ndarray) -> np.ndarray:
         """
         Find the largest quadrilateral contour assumed to be the puzzle grid.
 
@@ -82,24 +105,97 @@ class ImageProcessor:
         bottom = pts[2:][np.argsort(pts[2:, 0])]  # sort bottom two by x
         return np.array([top[0], top[1], bottom[1], bottom[0]], dtype="float32")
 
-    def warp(self, img, corners) -> np.ndarray:
+    def resize(self, image, width=None, height=None, inter=cv2.INTER_AREA):
+        # initialize the dimensions of the image to be resized and
+        # grab the image size
+        dim = None
+        (h, w) = image.shape[:2]
+
+        # if both the width and height are None, then return the
+        # original image
+        if width is None and height is None:
+            return image
+
+        # check to see if the width is None
+        if width is None:
+            # calculate the ratio of the height and construct the
+            # dimensions
+            r = height / float(h)
+            dim = (int(w * r), height)
+
+        # otherwise, the height is None
+        else:
+            # calculate the ratio of the width and construct the
+            # dimensions
+            r = width / float(w)
+            dim = (width, int(h * r))
+
+        # resize the image
+        resized = cv2.resize(image, dim, interpolation=inter)
+
+        # return the resized image
+        return resized
+
+    def warp(self, img:np.ndarray, corners:np.ndarray) -> np.ndarray:
         """
         Apply perspective transform to get a top-down view of the puzzle.
 
         Args:
-            img (np.ndarray): Original BGR image.
+            img (np.ndarray): Original image.
             corners (np.ndarray): Four unordered corner points.
 
         Returns:
             np.ndarray: Warped BGR image of size self.warp_size.
         """
         rect = self.sort_corners(corners)
-        h, w, c = img.shape
+        (h, w) = img.shape[:2]
 
         dst = np.array([[0, 0], [w, 0], [w, h], [0, h]], dtype="float32")
         M = cv2.getPerspectiveTransform(rect, dst)
 
         return cv2.warpPerspective(img, M, (w, h))
+
+    def make_white(self, img_bgr):
+        """
+        Preprocess an image to make background as white as possible
+        while preserving dark lines/text.
+
+        Steps:
+        1. Estimate and remove uneven background illumination (shading).
+        2. Stretch contrast locally (CLAHE) to enhance fine details.
+        3. Apply a gamma curve to brighten paper further without clipping.
+
+        Args:
+            bgr_img (np.ndarray): Input image in BGR color format.
+
+        Returns:
+            np.ndarray: Grayscale image with near-white background
+                        and enhanced contrast on dark elements.
+        """
+        if not self.is_grayscale(img_bgr):
+            gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY).astype(np.float32)
+        else:
+            gray = img_bgr
+
+        # estimate "shading" using heavy Gaussian blur — acts like background light map
+        bg = cv2.GaussianBlur(gray, (0, 0), 51)
+
+        # normalize: divide by the background map to remove lighting variations
+        # multiply by 255 to restore scale
+        norm = (gray / (bg + 1e-6)) * 255.0
+        norm = np.clip(norm, 0, 255).astype(np.uint8)
+
+        # local contrast enhancement (CLAHE)
+        clahe = cv2.createCLAHE(clipLimit=4.0, tileGridSize=(8, 8))
+        result = clahe.apply(norm)
+
+        # Gamma correction to brighten midtones
+        gamma = 0.8
+        lut = np.array([(i / 255.0) ** gamma * 255 for i in range(256)]).astype("uint8")
+        result = cv2.LUT(result, lut)
+
+        # result background 250‑255, lines 0‑40
+        return result
 
     def detect_grid_lines(self, img_warped: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         """
@@ -111,8 +207,13 @@ class ImageProcessor:
         Returns:
             tuple: (horizontal_lines, vertical_lines) binary masks.
         """
-        warped = img_warped.copy()
-        gray = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY)
+
+        if not self.is_grayscale(img_warped):
+            raise ValueError("Image is not grayscale")
+            #gray = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY)
+
+        gray = img_warped.copy()
+
         bw = cv2.adaptiveThreshold(
             gray, 255,
             cv2.ADAPTIVE_THRESH_MEAN_C,
@@ -150,6 +251,9 @@ class ImageProcessor:
         Returns:
             A copy of img with detected border artifacts painted white.
         """
+
+        if not self.is_grayscale(img):
+            raise ValueError("Image is not grayscale")
 
         gray = img.copy()
         blur = cv2.GaussianBlur(gray, (3, 3), 0)
@@ -249,7 +353,7 @@ class ImageProcessor:
         Crops a fixed number of pixels from all four sides of the image.
 
         Args:
-            img:    Input image (2D or 3D NumPy array).
+            img:    Input image grayscale.
             remove: Number of pixels to remove from each edge (top, bottom, left, right).
 
         Returns:
@@ -279,6 +383,9 @@ class ImageProcessor:
         Returns:
           image array with reduced noise.
         """
+        if not self.is_grayscale(img):
+            raise ValueError("Image is not grayscale")
+
         blur = cv2.GaussianBlur(img, (3, 3), 0)
         thresh = cv2.threshold(blur, 100, 245, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)[1]
 
@@ -301,6 +408,20 @@ class ImageProcessor:
             np.copyto(sharpened, image, where=low_contrast_mask)
         return sharpened
 
+    def unsharp_mask2(self, image, sigma=1.0, amount=0.5, threshold=3):
+        # 0‑255 -> 0‑1, float32
+        img = image.astype(np.float32) / 255.0
+        blur = cv2.GaussianBlur(img, (0, 0), sigma)
+
+        sharp = (1 + amount) * img - amount * blur
+        sharp = np.clip(sharp, 0, 1)
+
+        if threshold > 0:
+            low_contrast = np.abs(img - blur) < (threshold / 255.0)
+            sharp[low_contrast] = img[low_contrast]
+
+        return (sharp * 255).astype(np.uint8)
+
     def get_cell_dark_ratio(self, gray_cell_img:np.ndarray) -> int:
         """
         Calculates the ratio of dark (non-white) pixels in the center region of the image.
@@ -311,6 +432,9 @@ class ImageProcessor:
         :param gray_cell_img: Grayscale image to inspect
         :return: Ratio of dark pixels in the center, scaled to range 0–1000
         """
+        if not self.is_grayscale(gray_cell_img):
+            raise ValueError("Image is not grayscale")
+
         blur = cv2.GaussianBlur(gray_cell_img, (3, 3), 0)
         thresh = cv2.adaptiveThreshold(blur, 255,
                                        cv2.ADAPTIVE_THRESH_MEAN_C,
@@ -329,7 +453,7 @@ class ImageProcessor:
 
         return int(cv2.countNonZero(roi) / (roi.shape[0] * roi.shape[1]) * 1000)
 
-    def get_cell_split(self, gray_cell_img:np.ndarray) -> Optional[Dict[str, list[np.ndarray]]]:
+    def get_cell_split(self, gray_cell_img:np.ndarray, debug:bool=False) -> Optional[Dict[str, list[np.ndarray]]]:
         """
         Detects and extracts the main dividing line (if any) in a cell image,
         and splits the cell into two separate regions along that line.
@@ -338,10 +462,13 @@ class ImageProcessor:
         The first returned part is always the lower or left region (typically the clue),
         and the second part is the upper or right region (typically the solution space).
 
-        :param gray_cell_img: A grayscale image of a puzzle cell.
+        :param gray_cell_img: grayscale image of a cell.
         :return: A dictionary with the orientation of the split and the resulting image parts.
                  If no divider is found, returns the original image with orientation "none".
         """
+        if not self.is_grayscale(gray_cell_img):
+            raise ValueError("Image is not grayscale")
+
         img = gray_cell_img.copy()
         # enlarge for better results
         #img = cv2.resize(img, None, fx=3, fy=3, interpolation=cv2.INTER_LANCZOS4)
@@ -349,6 +476,11 @@ class ImageProcessor:
         tmp = self.remove_border_artifacts(img, thresh=240, max_coverage=0.09)
         #tmp = self.crop_border(tmp, remove=3)
         edges = cv2.Canny(tmp, 100, 240, apertureSize=3)
+
+        if debug:
+            cv2.imshow('edges', edges)
+            cv2.waitKey(0)
+            cv2.destroyAllWindows()
 
         # line has to be at least 60% of length of the smaller image dimension
         min_len = int(min(img.shape) * 0.6)
@@ -429,34 +561,42 @@ class ImageProcessor:
             "parts": [bottom_left, top_right]
         }
 
-    def extract_text(self, row_idx: int, col_idx: int, gray_cell_img:np.ndarray,
+    def extract_text(self, gray_cell_img:np.ndarray,
                      with_spellcheck=False, debug=False) -> Optional[str]:
+        """
+        Extracts text from gray_cell_img.
+        While processing the image the dark border artifacts where removed.
+        Then some blurring and sharpening.
+        In the threshold mask dark areas are enhanced and small gaps are closed.
+
+        :param gray_cell_img: a grayscale image of a cell.
+        :return: recognized text or None.
+        """
+
+        if not self.is_grayscale(gray_cell_img):
+            raise ValueError("Image is not grayscale")
 
         gray = gray_cell_img.copy()
 
         # remove borders
         without_borders = self.remove_border_artifacts(gray, thresh=240, max_coverage=0.03, max_thickness=5)
 
-        # glätten
+        # blurring
         result = cv2.medianBlur(without_borders, 1)
 
-        # Unsharp Masking
+        # unsharp Masking
         result = self.unsharp_mask(result, amount=4)
 
-        # Globaler Threshold
-        _, result = cv2.threshold(result, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+        #_, result = cv2.threshold(result, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
 
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 1))
-        result = cv2.dilate(result, kernel, iterations=2)
+        #kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
+        #result = cv2.dilate(result, kernel, iterations=1)
 
-        closing_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 1))
-        result = cv2.morphologyEx(result, cv2.MORPH_CLOSE, closing_kernel)
+        #closing_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 1))
+        #result = cv2.morphologyEx(result, cv2.MORPH_CLOSE, closing_kernel)
 
         if debug:
-            #cv2.imshow('input', gray)
-            #cv2.imshow('without_borders', without_borders)
-            #cv2.imshow('enlarged', enlarged)
-            cv2.imshow('result', result)
+            cv2.imshow('Debug', result)
             cv2.waitKey(0)
             cv2.destroyAllWindows()
 
