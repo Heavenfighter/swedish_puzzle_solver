@@ -97,24 +97,33 @@ class ClueCell(Cell):
         if db_conn:
             db_conn.execute("PRAGMA journal_mode = WAL")
             db_conn.execute("PRAGMA synchronous  = NORMAL")
+            db_conn.row_factory = sqlite3.Row
             cursor = db_conn.cursor()
 
         for clue in self.clues:
             try:
+                if not clue.text:
+                    continue
+
+               # if clue.text == "eine Zierpflanze":
+               #     continue
+
                 LOG.debug(f"searching {clue.text} ({len(clue.path)})")
 
                 row = None
                 if cursor:
-                    cursor.execute("SELECT id, solutions FROM clues WHERE id = ?", (clue.id,))
+                    cursor.execute("SELECT id, len, solutions FROM clues WHERE id = ? and len = ?",
+                                   (clue.text,len(clue.path),))
                     row = cursor.fetchone()
 
                 if not row:
                     clue.add_candidates(self._solver.lookup_answers_online(clue.text, len(clue.path), use_threads))
 
                     if cursor and clue.candidates:
-                        cursor.execute("INSERT OR REPLACE INTO clues (id, solutions) VALUES (?, ?)", (clue.id, json.dumps(clue.candidates)))
+                        cursor.execute("INSERT OR REPLACE INTO clues (id, len, solutions) VALUES (?, ?, ?)",
+                                       (clue.text, len(clue.path), json.dumps(clue.candidates)))
                 else:
-                    clue.candidates = json.loads(row[1])
+                    clue.candidates = json.loads(row['solutions'])
             except Exception as ex:
                 LOG.error(ex, exc_info=True)
                 if db_conn:
@@ -224,8 +233,10 @@ class SwedishPuzzleSolver(ImageProcessor):
         with closing(connection.cursor()) as cursor:
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS clues (
-                    id Text PRIMARY KEY,
-                    solutions Text
+                    id Text NOT NULL,
+                    len INTEGER NOT NULL, 
+                    solutions Text,
+                    PRIMARY KEY (id, len)
                 )
             ''')
         connection.commit()
@@ -355,7 +366,7 @@ class SwedishPuzzleSolver(ImageProcessor):
 
             for gray_part_img in res["parts"]:
 
-                text = self.extract_text(gray_part_img, debug=True)
+                text = self.extract_text(gray_part_img)
                 if text:
                     cell.add_clue(text)
                     LOG.debug(f'\tclues: {text}')
@@ -370,7 +381,8 @@ class SwedishPuzzleSolver(ImageProcessor):
 
             # Arrow detection via template matching
             detector = ArrowDetector(enlarged)
-            arrows = detector.find_arrows_with_template(match_threshold=0.87, min_black_fraction=0.05)
+            arrows = detector.find_arrows_with_template(match_threshold=0.85, min_black_fraction=0.05,
+                                                        debug=((row_idx==10 and col_idx==9) and False))
 
             if len(arrows):
                 # remove border artifacts by coloring dark pixel white
@@ -383,9 +395,12 @@ class SwedishPuzzleSolver(ImageProcessor):
 
                 # Some puzzles have a small distance between cell border an arrow
                 # therefore only one pixel tolerance
+                #debug = ((row_idx==0 and col_idx==1 and sys.argv[2] == "test/schwede_5.jpg") or
+                #         (row_idx==4 and col_idx==0 and sys.argv[2] == "test/schwede_1.jpg") or
+                #         (row_idx==0 and col_idx==4 and sys.argv[2] == "test/schwede_4.jpg"))
                 _, arrow_source_sides_dict = (
                     detector.detect_black_lines_near_edges(image=resized_up,
-                                                           threshold=200, tolerance=1, debug=(row_idx==4 and col_idx==0)))
+                                                           threshold=200, tolerance=1))
 
                 if (not any(arrow_source_sides_dict.values()) or
                         sum(1 for value in arrow_source_sides_dict.values() if value) != len(arrows)):
@@ -485,11 +500,12 @@ class SwedishPuzzleSolver(ImageProcessor):
 
         self.__orig_img = cv2.imread(image_path)
 
-
         binary = self.preprocess(self.__orig_img)
         corners = self.find_grid_contour(binary)
 
+        # do some bleaching
         whitey = self.make_white(self.__orig_img)
+
         self.__warped_img = self.warp(whitey, corners)
         self.board = Board(warped=self.__warped_img)
 
@@ -603,6 +619,7 @@ class SwedishPuzzleSolver(ImageProcessor):
                                 thickness=3,
                                 lineType=cv2.LINE_AA)
 
+        cv2.namedWindow('Board', cv2.WINDOW_GUI_NORMAL)
         cv2.imshow("Board", vis)
         cv2.waitKey(0)
         cv2.destroyAllWindows()
@@ -848,6 +865,9 @@ class SwedishPuzzleSolver(ImageProcessor):
                 if not open_clues:
                     return
 
+                # sort by number of candidates
+                open_clues.sort(key=lambda clue: len(clue.remaining))
+
                 # Select the next slot to assign (using MRV heuristic)
                 clue = self.__select_next_clue(open_clues, assignment)
                 if clue is None:
@@ -865,8 +885,6 @@ class SwedishPuzzleSolver(ImageProcessor):
                     LOG.debug(f'{"  " * depth}ok')
 
                     dfs(assignment, depth + 1)
-
-                    LOG.debug(f'{"  " * depth}{word} dismissed')
 
                     del assignment[clue.id]  # Backtrack
             except Exception as ex:

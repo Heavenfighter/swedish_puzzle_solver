@@ -585,23 +585,18 @@ class ImageProcessor:
         result = cv2.medianBlur(without_borders, 1)
 
         # unsharp Masking
-        result = self.unsharp_mask(result, amount=3)
+        result = self.unsharp_mask(result, amount=4)
 
-        _, result = cv2.threshold(result, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+        #_, result = cv2.threshold(result, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
 
-        if debug:
-            cv2.imshow('result1', without_borders)
-            cv2.waitKey(0)
-            cv2.destroyAllWindows()
+        #kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
+        #result = cv2.dilate(result, kernel, iterations=1)
 
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
-        result = cv2.dilate(result, kernel, iterations=1)
-
-        closing_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 1))
-        result = cv2.morphologyEx(result, cv2.MORPH_CLOSE, closing_kernel)
+        #closing_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 1))
+        #result = cv2.morphologyEx(result, cv2.MORPH_CLOSE, closing_kernel)
 
         if debug:
-            cv2.imshow('result', result)
+            cv2.imshow('Debug', result)
             cv2.waitKey(0)
             cv2.destroyAllWindows()
 
