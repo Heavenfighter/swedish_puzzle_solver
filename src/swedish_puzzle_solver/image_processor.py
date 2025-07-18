@@ -475,7 +475,7 @@ class ImageProcessor:
 
         tmp = self.remove_border_artifacts(img, thresh=240, max_coverage=0.09)
         #tmp = self.crop_border(tmp, remove=3)
-        edges = cv2.Canny(tmp, 100, 240, apertureSize=3)
+        edges = cv2.Canny(tmp, 100, 210, apertureSize=3)
 
         if debug:
             cv2.imshow('edges', edges)
@@ -515,10 +515,10 @@ class ImageProcessor:
         angle = np.degrees(np.arctan2(y2 - y1, x2 - x1)) % 180
 
         # Identify the orientation based on angle (only horizontal or diagonal allowed) 10° deviation allowed
-        treshold = 10
-        if abs(angle - 0) < treshold or abs(angle - 180) < treshold:
+        threshold = 10
+        if abs(angle - 0) < threshold or abs(angle - 180) < threshold:
             orientation =  'horizontal'
-        elif abs(angle - 45) < treshold:
+        elif abs(angle - 45) < threshold:
             orientation = 'diagonal'  # top left to bottom right
         else:
             if abs(angle) == 90:
@@ -562,7 +562,7 @@ class ImageProcessor:
         }
 
     def extract_text(self, gray_cell_img:np.ndarray,
-                     with_spellcheck=False, debug=False) -> Optional[str]:
+                     with_spellcheck=False, debug=False) -> str:
         """
         Extracts text from gray_cell_img.
         While processing the image the dark border artifacts where removed.
@@ -620,7 +620,7 @@ class ImageProcessor:
             clue = " ".join(words).replace("- ", "")
 
         if not clue:
-            return None
+            return ""
 
         approximations = {
             'ō': 'ö',
@@ -663,4 +663,4 @@ class ImageProcessor:
             if len(corrected):
                 clue = " ".join(corrected)
 
-        return clue if clue else None
+        return clue if clue else ""

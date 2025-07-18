@@ -91,24 +91,21 @@ class ClueCell(Cell):
         self.type = Celltype.CLUE
         self._solver = OnlineSolver()
 
-    def lookup_answers(self, use_threads:bool=False) -> None:
-        db_conn = sqlite3.connect(DB_PATH)
-        cursor = None
-        if db_conn:
-            db_conn.execute("PRAGMA journal_mode = WAL")
-            db_conn.execute("PRAGMA synchronous  = NORMAL")
-            db_conn.row_factory = sqlite3.Row
-            cursor = db_conn.cursor()
+    def lookup_answers(self, use_threads:bool=False, use_db:bool=False) -> None:
+
+        cursor, db_conn = None, None
+        if use_db:
+            db_conn = sqlite3.connect(DB_PATH)
+            if db_conn:
+                db_conn.execute("PRAGMA journal_mode = WAL")
+                db_conn.execute("PRAGMA synchronous  = NORMAL")
+                db_conn.row_factory = sqlite3.Row
+                cursor = db_conn.cursor()
 
         for clue in self.clues:
             try:
                 if not clue.text:
                     continue
-
-               # if clue.text == "eine Zierpflanze":
-               #     continue
-
-                LOG.debug(f"searching {clue.text} ({len(clue.path)})")
 
                 row = None
                 if cursor:
@@ -117,12 +114,14 @@ class ClueCell(Cell):
                     row = cursor.fetchone()
 
                 if not row:
+                    LOG.debug(f'searching "{clue.text}" ({len(clue.path)}) online')
                     clue.add_candidates(self._solver.lookup_answers_online(clue.text, len(clue.path), use_threads))
 
                     if cursor and clue.candidates:
                         cursor.execute("INSERT OR REPLACE INTO clues (id, len, solutions) VALUES (?, ?, ?)",
                                        (clue.text, len(clue.path), json.dumps(clue.candidates)))
                 else:
+                    LOG.debug(f'searching "{clue.text}" ({len(clue.path)}) from DB')
                     clue.candidates = json.loads(row['solutions'])
             except Exception as ex:
                 LOG.error(ex, exc_info=True)
@@ -138,11 +137,12 @@ class ClueCell(Cell):
         if db_conn:
             db_conn.commit()
             db_conn.close()
-            time.sleep(1)
+            #time.sleep(1)
 
-    def add_clue(self, text:str):
+    def add_clue(self, text:str) -> Clue:
         clue = Clue(text, self)
         self.clues.append(clue)
+        return clue
 
 class Clue:
     def __init__(self, text:str, cell:ClueCell):
@@ -222,12 +222,14 @@ class SwedishPuzzleSolver(ImageProcessor):
     """
     Detects grid with OpenCV, OCRs clues, queries online, then backtracks fill.
     """
-    def __init__(self) -> None:
+    def __init__(self, use_threads:bool=False, use_db:bool=False) -> None:
         super().__init__()
 
         self.__orig_img = None
         self.__warped_img = None
         self.board: Board
+        self.__use_threads = use_threads
+        self.__use_db = use_db
 
         connection = sqlite3.connect(DB_PATH)
         with closing(connection.cursor()) as cursor:
@@ -285,7 +287,7 @@ class SwedishPuzzleSolver(ImageProcessor):
             row.append(cell)
         return row_idx, row
 
-    def __extract_cells(self, img_warped:np.ndarray, use_threads:bool=False) -> None:
+    def __extract_cells(self, img_warped:np.ndarray) -> None:
         horiz, vert = self.detect_grid_lines(img_warped)
         inters = cv2.bitwise_and(horiz, vert)
 
@@ -295,7 +297,7 @@ class SwedishPuzzleSolver(ImageProcessor):
 
         self.board.cells.clear()
 
-        if use_threads:
+        if self.__use_threads:
             self.board.cells = [None] * (len(rows) - 1)  # Ergebnisliste vorbereiten
             with ThreadPoolExecutor(max_workers=8) as executor:
                 futures = [
@@ -367,11 +369,10 @@ class SwedishPuzzleSolver(ImageProcessor):
             for gray_part_img in res["parts"]:
 
                 text = self.extract_text(gray_part_img)
+                clue = cell.add_clue(text)
+
                 if text:
-                    cell.add_clue(text)
                     LOG.debug(f'\tclues: {text}')
-                else:
-                    cell.add_clue("")
 
             if len(cell.clues) != len(res["parts"]):
                 # not all clues could be determined, don't exit
@@ -381,8 +382,7 @@ class SwedishPuzzleSolver(ImageProcessor):
 
             # Arrow detection via template matching
             detector = ArrowDetector(enlarged)
-            arrows = detector.find_arrows_with_template(match_threshold=0.85, min_black_fraction=0.05,
-                                                        debug=((row_idx==10 and col_idx==9) and False))
+            arrows = detector.find_arrows_with_template(match_threshold=0.85, min_black_fraction=0.05)
 
             if len(arrows):
                 # remove border artifacts by coloring dark pixel white
@@ -511,7 +511,7 @@ class SwedishPuzzleSolver(ImageProcessor):
 
         # build board and classify all cells
         LOG.info(f"extracting cells...")
-        self.__extract_cells(self.__warped_img, use_threads=False)
+        self.__extract_cells(self.__warped_img)
         LOG.info(f"{sum(map(len, self.board.cells))} cells found")
 
         if LOG.getEffectiveLevel() == logging.DEBUG:
@@ -539,12 +539,17 @@ class SwedishPuzzleSolver(ImageProcessor):
                 # fillcolor depends on type
                 color = TYPE_COLORS.get(cell.type, (128, 128, 128))
 
+                # color for clues without complete solution
                 clue_error = False
-                if isinstance(cell, ClueCell) and any(not clue.candidates for clue in cell.clues) and not debug:
-                    clue_error = True
-                    color = (0,0,255)
+                if isinstance(cell, ClueCell):
+                    if not debug:
+                        for clue in cell.clues:
+                              if not all(cells[x][y].letter for x,y in clue.path):
+                                clue_error = True
+                                color = (0,0,255)
+                                break
 
-                # fill background for classification
+                # fill background
                 roi = vis[cell.top_left[1]:cell.bottom_right[1], cell.top_left[0]:cell.bottom_right[0]]
                 overlay = roi.copy()
                 overlay[:] = color
@@ -559,7 +564,7 @@ class SwedishPuzzleSolver(ImageProcessor):
                         cell.top_left,
                         cell.bottom_right,
                         (0, 255, 0),
-                        1
+                        2
                     )
 
                     # show cell indices
@@ -718,7 +723,7 @@ class SwedishPuzzleSolver(ImageProcessor):
 
         return best
 
-    def solve(self, debug=False, use_threads:bool=False) -> None:
+    def solve(self, debug=False) -> bool:
 
         LOG.info("trying to solve this riddle")
         if debug:
@@ -805,11 +810,13 @@ class SwedishPuzzleSolver(ImageProcessor):
         else:
             # lookup candidates online
             LOG.info("hoping for answers...")
-            if use_threads:
+            if self.__use_threads:
                 with ThreadPoolExecutor(max_workers=5) as executor:
                     # Dictionary zum Zuordnen der Futures zu ihren Funktionen
                     future_to_obj = {
-                        executor.submit(clue_cell.lookup_answers, use_threads): clue_cell for clue_cell in self.board.clue_cells
+                        executor.submit(clue_cell.lookup_answers,
+                                        use_threads=True, use_db=self.__use_db):
+                                clue_cell for clue_cell in self.board.clue_cells
                     }
 
                     for future in as_completed(future_to_obj):
@@ -820,7 +827,7 @@ class SwedishPuzzleSolver(ImageProcessor):
                             LOG.error(f"Object {obj} failed: {ex}")
             else:
                 for clue_cell in self.board.clue_cells:
-                    clue_cell.lookup_answers(use_threads)
+                    clue_cell.lookup_answers(use_threads=self.__use_threads, use_db=self.__use_db)
 
         LOG.info("answers are being processed...")
 
@@ -896,7 +903,8 @@ class SwedishPuzzleSolver(ImageProcessor):
 
         return best
 
-    def __lcv_score(self, word:str, clue:Clue, clues: List[Clue], assignment:Dict[str, str]) -> int:
+    @staticmethod
+    def __lcv_score(word:str, clue:Clue, clues: List[Clue], assignment:Dict[str, str]) -> int:
         """
         Compute the Least Constraining Value (LCV) score for a given candidate word
         in a particular clue.
@@ -974,6 +982,18 @@ def main(args: list[str]) -> None:
     )
 
     parser.add_argument(
+        "-t", "--use_threads",
+        action="store_true",
+        help="program use multiple threads to improve performance (log output is harder to read)"
+    )
+
+    parser.add_argument(
+        "-s", "--store",
+        action="store_true",
+        help="program stores clues and possible answers in SQLite database"
+    )
+
+    parser.add_argument(
         "puzzle_image_path",
         nargs="+",
         help="path to the puzzle image"
@@ -985,12 +1005,12 @@ def main(args: list[str]) -> None:
         LOG.setLevel(logging.DEBUG)
 
     try:
-        solver = SwedishPuzzleSolver()
+        solver = SwedishPuzzleSolver(use_threads=args.use_threads, use_db=args.store)
 
         for img_path in args.puzzle_image_path:
             solver.build_board(img_path)
 
-            if not solver.solve(debug=False, use_threads=True):
+            if not solver.solve(debug=False):
                 print(f"No solution found for puzzle {img_path}.")
                 continue
 
