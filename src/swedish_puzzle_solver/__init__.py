@@ -125,14 +125,12 @@ class ClueCell(Cell):
                     clue.candidates = json.loads(row['solutions'])
             except Exception as ex:
                 LOG.error(ex, exc_info=True)
-                if db_conn:
-                    db_conn.commit()
-                    db_conn.close()
             finally:
                 LOG.debug(clue.candidates)
 
                 # take all candidates as remaining
                 clue.remaining = clue.candidates.copy()
+                db_conn.commit()
 
         if db_conn:
             db_conn.commit()
